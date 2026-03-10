@@ -18,6 +18,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 🚨 终极修复 1：为 yt-dlp 强行注入 JS 解密引擎，无视 YouTube 签名墙
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -33,8 +39,8 @@ jobs:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          # 🚨 必须加上下面这行，脚本才能拿到你的 Scrapeless 密钥！
           SCRAPELESS_API_KEY: ${{ secrets.SCRAPELESS_API_KEY }}
+          YT_PROXY: ${{ secrets.YT_PROXY }}
         run: |
           python youtube_auto_task.py
 
