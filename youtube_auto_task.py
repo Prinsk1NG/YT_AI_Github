@@ -247,32 +247,34 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(vid)
-            t = None
-            # 策略1：优先寻找英文或中文（不管是人工还是机器生成）
+            transcript = None
+            # 策略1：最经典稳妥的底层API调用，按优先级尝试获取主流语言字幕
             try:
-                t = transcript_list.find_transcript(['en', 'zh', 'zh-Hans', 'zh-Hant'])
-            except:
-                # 策略2：饥不择食模式！只要有字幕，不管是哪国语言，先抓下来，Claude自己会翻译
-                available_transcripts = list(transcript_list._manually_created_transcripts.values()) + list(transcript_list._generated_transcripts.values())
-                if available_transcripts:
-                    t = available_transcripts[0] # 直接拿第一个
+                transcript = YouTubeTranscriptApi.get_transcript(
+                    vid, 
+                    languages=['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru']
+                )
+            except Exception:
+                # 策略2：终极兜底，不挑食，强制拉取视频默认的任何语言字幕
+                transcript = YouTubeTranscriptApi.get_transcript(vid)
             
-            if not t:
-                raise Exception("该视频完全不存在任何语言的字幕")
+            if not transcript:
+                raise Exception("该视频未提供任何文本字幕")
 
-            transcript = t.fetch()
             full_text = " ".join([item['text'] for item in transcript])
             
+            # 过滤过短的垃圾切片
             if len(full_text) > 1500:
                 v["transcript"] = full_text
                 valid_videos.append(v)
-                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {t.language})")
+                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符)")
             else:
                 print(f"  ⚠️ 字幕过短丢弃: {v['title'][:20]}")
                 
         except Exception as e:
-            print(f"  ❌ 跳过 [{v['title'][:20]}]: {e}")
+            # 简化报错信息，避免满屏乱码
+            err_msg = str(e).split('\n')[0] if str(e) else "API限制或无字幕"
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: {err_msg[:60]}")
             
     return valid_videos
 
