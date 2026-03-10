@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v1.7 (钛合金装甲版：三引擎并联 + 极客 Debug)
-Architecture: RSS + Native Search -> API/yt-dlp/Scrapeless -> Claude 3.7 -> Feishu
+youtube_auto_task.py  v1.9 (终极战神版：暴力正则解码 + JS运行时注入 + 三引擎协同)
+Architecture: RSS + Native Search -> Scrapeless(Regex) / API / yt-dlp -> Claude 3.7 -> Feishu
 """
 
 import os
@@ -21,10 +21,8 @@ import feedparser
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 KIMI_API_KEY       = os.getenv("KIMI_API_KEY", "")
-
-# 🌐 新增：Scrapeless API Token 及 代理配置
 SCRAPELESS_API_KEY = os.getenv("SCRAPELESS_API_KEY", "")
-YT_PROXY = os.getenv("YT_PROXY", "")
+YT_PROXY           = os.getenv("YT_PROXY", "")
 
 if YT_PROXY:
     os.environ["http_proxy"]  = YT_PROXY
@@ -37,18 +35,21 @@ if SCRAPELESS_API_KEY:
 # ── Tracking & Thresholds ────────────────────────────────────────────────────
 MIN_DURATION_SEC = 15 * 60   # 最短 15 分钟（过滤切片）
 MIN_VIEWS        = 5000      # 搜索轨最低播放量
-EVICTION_DAYS    = 30        # 30天淘汰机制
+EVICTION_DAYS    = 30        # 30天无动态自动淘汰机制
 
 # ── 50 大核心频道 ─────────────────────────────────────────
 CORE_CHANNELS = {
+    # 海外顶级对谈 / 播客
     "UC1yNl2E66ZzKApQdRu53wwA": {"name": "Lex Fridman", "cat": "深度播客"},
     "UCcefcZRL2oaA_uBNeo5UOWg": {"name": "a16z", "cat": "顶级VC"},
     "UCaOtN7i8H72E7Uj4P1-QzQA": {"name": "Dwarkesh Patel", "cat": "深度播客"},
     "UC0vOXJzXQGoqYq4n1-YkH-w": {"name": "All-In Podcast", "cat": "商业创投"},
     "UCcefcZRL2oaA_uBNeo5UOWh": {"name": "Y Combinator", "cat": "顶级VC"},
+    # 海外硬核技术
     "UCLNgu_OupwoeESgtab33CCw": {"name": "Andrej Karpathy", "cat": "硬核技术"},
     "UCbfYPyITQ-7l4upoX8nvctg": {"name": "Two Minute Papers", "cat": "学术前沿"},
     "UC3XGzPbbB1_xR0Q8z_K3_ww": {"name": "AI Explained", "cat": "深度评测"},
+    # 此处可继续添加其他频道的 Channel ID
 }
 
 # ── 30 大流动超级节点 ───────────────────────────────────────
@@ -89,14 +90,16 @@ def parse_views(view_str):
     return int(num.group()) if num else 0
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 独家黑科技：Scrapeless 防爆网页请求器
+# Scrapeless Web Unlocker 引擎
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_html_anti_bot(url):
+    """利用 Scrapeless API 获取渲染后的 HTML 源码"""
     if SCRAPELESS_API_KEY:
         try:
             api_url = "https://api.scrapeless.com/api/v1/scraper/request"
             payload = {"actor": "scraper.webunlocker", "input": {"url": url}}
             headers = {"x-api-token": SCRAPELESS_API_KEY, "Content-Type": "application/json"}
+            # 必须绕开本地代理直连 API
             resp = requests.post(api_url, json=payload, headers=headers, proxies={"http": None, "https": None}, timeout=45)
             try:
                 json_res = resp.json()
@@ -106,20 +109,22 @@ def fetch_html_anti_bot(url):
             except: pass
             return resp.text
         except Exception as e:
-            print(f"  ⚠️ Scrapeless 解锁失败，尝试回退直连: {e}")
+            print(f"  [Debug] Scrapeless 请求出错: {e}")
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.9"}
+    # 兜底直连
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     return requests.get(url, headers=headers, timeout=15).text
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 1.5: 搜索解析引擎 (已接入 Scrapeless)
+# Phase 1: 扫描模块 (固定频道 RSS + 全网 VIP 关键词检索)
 # ════════════════════════════════════════════════════════════════════════════
 def native_youtube_search(query, limit=5):
     url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}&sp=CAI%253D"
     results = []
     try:
         html_text = fetch_html_anti_bot(url)
-        match = re.search(r'var ytInitialData = (\{.*?\});</script>', html_text)
+        # 兼容性更强的正则变量查找
+        match = re.search(r'(?:ytInitialData|window\["ytInitialData"\])\s*=\s*(\{.+?\});', html_text)
         if not match: return results
             
         data = json.loads(match.group(1))
@@ -142,13 +147,9 @@ def native_youtube_search(query, limit=5):
                     "publishedTime": pub_time, "viewCount": view_count_str, "duration": duration_str
                 })
                 if len(results) >= limit: break
-    except Exception as e:
-        print(f"  ⚠️ 原生解析异常: {e}")
+    except: pass
     return results
 
-# ════════════════════════════════════════════════════════════════════════════
-# Phase 1: 轨道 A - RSS 订阅
-# ════════════════════════════════════════════════════════════════════════════
 def scan_rss_channels(tracking_state, time_limit_hours=24):
     print(f"\n[轨道A] 正在通过 RSS 扫描 {len(CORE_CHANNELS)} 个核心频道...")
     now = datetime.datetime.now(timezone.utc)
@@ -173,7 +174,6 @@ def scan_rss_channels(tracking_state, time_limit_hours=24):
                     })
             if has_new: tracking_state["channels"][ch_id] = now.isoformat()
         except: pass
-            
     print(f"[轨道A] 扫描完成，发现 {len(results)} 个最新视频。")
     return results
 
@@ -204,17 +204,16 @@ def scan_vip_interviews(tracking_state):
             if has_valid: tracking_state["vips"][vip] = now.isoformat()
             time.sleep(1) 
         except: pass
-            
     print(f"[轨道B] 扫描完成，捕获 {len(results)} 个 VIP 高质长视频。")
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: 钛合金装甲字幕引擎 (三引擎无缝接力)
+# Phase 2: 钛合金装甲字幕引擎 (三核全开接力穿透，彻底无视封锁)
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 正在挂载装甲字幕引擎 (开启三引擎协同防爆机制)...")
-    
-    # 确保依赖存在
+    print("\n[提取] 引擎点火中：检测到环境就绪，准备执行暴力解码...")
+
+    # 动态注入包，防止预环境丢失
     os.system(f"{sys.executable} -m pip install -q yt-dlp youtube-transcript-api")
     import subprocess
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -228,26 +227,45 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         full_text = ""
         
-        # 🟢 引擎 1: 高速 API 抓取 (带代理穿透)
-        try:
-            proxies = {"http": YT_PROXY, "https": YT_PROXY} if YT_PROXY else None
-            t_list = YouTubeTranscriptApi.get_transcript(vid, languages=['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US'], proxies=proxies)
-            full_text = " ".join([x['text'] for x in t_list])
-        except Exception as e1:
+        # 🔴 主力战神：Scrapeless 全局暴力正则抓取 (无视 YouTube 前端改版)
+        if SCRAPELESS_API_KEY and not full_text:
             try:
-                # 兜底：不限制语言强抓
-                t_list = YouTubeTranscriptApi.get_transcript(vid, proxies=proxies)
-                full_text = " ".join([x['text'] for x in t_list])
-            except Exception as e1_2:
-                print(f"  [Debug] 引擎1(API) 抓取失败: {str(e1_2).split(chr(10))[0][:60]}")
+                html_text = fetch_html_anti_bot(f"https://www.youtube.com/watch?v={vid}")
+                clean_html = html_text.replace('\\u0026', '&').replace('\\/', '/').replace('\\\\', '\\')
+                
+                # 暴力抓取隐藏在页面任何角落的 timedtext API
+                urls = re.findall(r'"baseUrl"\s*:\s*"(https://[a-zA-Z0-9_.-]+/api/timedtext[^"]+)"', clean_html)
+                if urls:
+                    target_url = urls[0] # 兜底随便拿一个
+                    for u in list(set(urls)):
+                        if 'lang=zh' in u or 'lang=en' in u: target_url = u; break
+                        
+                    t_resp = requests.get(target_url, timeout=15)
+                    texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
+                    full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
+                else:
+                    print(f"  [Debug] Scrapeless 暴力正则未找到隐藏的 api/timedtext 链接")
+            except Exception as e: 
+                print(f"  [Debug] 引擎1(Scrapeless) 解析崩溃: {e}")
 
-        # 🟡 引擎 2: yt-dlp 强穿透解析
+        # 🟡 备胎一：YouTubeTranscriptApi 底层对象调用 (修复之前属性报错)
         if not full_text or len(full_text) < 500:
             try:
-                # 使用 sys.executable 绝对路径，彻底解决 GitHub Actions 中找不到命令的问题
-                cmd = [sys.executable, "-m", "yt_dlp", "--dump-json", "--skip-download"]
+                t_list = YouTubeTranscriptApi.list_transcripts(vid)
+                try:
+                    t = t_list.find_transcript(['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US'])
+                except:
+                    t = t_list.find_generated_transcript(['en', 'zh']) # 强拿机翻
+                full_text = " ".join([x['text'] for x in t.fetch()])
+            except Exception as e:
+                print(f"  [Debug] 引擎2(API) 抓取失败: {str(e).split(chr(10))[0][:60]}")
+
+        # 🟢 备胎二：yt-dlp 强穿透解析 (利用 GitHub Actions 的 Node.js 运行时解密)
+        if not full_text or len(full_text) < 500:
+            try:
+                # 使用 sys.executable 绝对路径，彻底解决找不到命令的问题
+                cmd = [sys.executable, "-m", "yt_dlp", "--dump-json", "--skip-download", f"https://www.youtube.com/watch?v={vid}"]
                 if YT_PROXY: cmd.extend(["--proxy", YT_PROXY])
-                cmd.append(f"https://www.youtube.com/watch?v={vid}")
                 
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
                 if res.returncode == 0:
@@ -274,41 +292,18 @@ def fetch_transcripts(video_list):
                             raw = re.sub(r'<[^>]+>', ' ', t_resp.text)
                             full_text = html.unescape(re.sub(r'[\d:\.\->]+', ' ', raw))
                 else:
-                    print(f"  [Debug] 引擎2(yt-dlp) 执行错误: {res.stderr.strip()[:60]}")
-            except Exception as e2: 
-                print(f"  [Debug] 引擎2(yt-dlp) 崩溃: {e2}")
+                    print(f"  [Debug] 引擎3(yt-dlp) 被拦截或解密失败: {res.stderr.strip()[-60:]}")
+            except Exception as e:
+                print(f"  [Debug] 引擎3(yt-dlp) 崩溃: {e}")
 
-        # 🔴 引擎 3: Scrapeless 强解底包 (最强备胎)
-        if (not full_text or len(full_text) < 500) and SCRAPELESS_API_KEY:
-            try:
-                html_text = fetch_html_anti_bot(f"https://www.youtube.com/watch?v={vid}")
-                # 不用脆弱的正测猜链接，直接生抠官方核心 JSON
-                match = re.search(r'ytInitialPlayerResponse\s*=\s*(\{.+?\});', html_text)
-                if match:
-                    data = json.loads(match.group(1))
-                    tracks = data.get('captions', {}).get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
-                    if tracks:
-                        target_url = tracks[0]['baseUrl']
-                        for t in tracks:
-                            if 'zh' in t.get('languageCode', '') or 'en' in t.get('languageCode', ''):
-                                target_url = t['baseUrl']; break
-                        t_resp = requests.get(target_url, proxies={"http": None, "https": None}, timeout=15)
-                        texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
-                        full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
-                else:
-                    print("  [Debug] 引擎3(Scrapeless) 未能在此视频页找到 JSON 结构")
-            except Exception as e3: 
-                print(f"  [Debug] 引擎3(Scrapeless) 解析失败: {e3}")
-
-        # --- 最终验证与录入 ---
+        # --- 最终验证与清理录入 ---
         full_text = " ".join(full_text.split())
         if len(full_text) > 800:
             v["transcript"] = full_text
             valid_videos.append(v)
             print(f"  ✅ [{v['author'][:10]}] {v['title'][:25]}... ({len(full_text)} 字)")
         else:
-            # 极少部分视频是真的没有字幕！这里打出结论
-            print(f"  ❌ 跳过 [{v['title'][:20]}]: 三大引擎均无法获取内容 (大概率原视频未开启字幕)")
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: 三层装甲均未命中 (极大概率此视频根本没有英/中字幕)")
             
     return valid_videos
 
@@ -319,7 +314,9 @@ def llm_deep_analysis(videos):
     if not videos: return []
     print(f"\n[大脑] 提交 {len(videos)} 个长视频给 LLM 进行金字塔分析...")
     
+    # 构建压缩版的 JSON，防止超长
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "\n...\n" + v["transcript"][-15000:] if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
+    
     prompt = f"""你是顶级硅谷创投分析师。以下是过去24小时内YouTube高价值AI对谈/讲座的全量字幕。
 请使用「金字塔原理」对这些长内容进行降维打击级的深度拆解。
 
@@ -351,6 +348,7 @@ def llm_deep_analysis(videos):
 @@@END@@@
 """
     proxies_bypass = {"http": None, "https": None}
+    
     if OPENROUTER_API_KEY:
         try:
             print("  ➡️ 调用 Claude 3.7 Sonnet 中...")
@@ -378,9 +376,13 @@ def _extract_json(text):
         print(f"解析 JSON 失败: {e}")
         return []
 
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 4: Feishu 研报级卡片排版渲染
+# ════════════════════════════════════════════════════════════════════════════
 def build_youtube_feishu_card(analyzed_videos):
     if not analyzed_videos: return None
     date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每日早8点准时更新 | 深度长视频拆解 | 认知升级引擎**"}, "icon": {"tag": "standard_icon", "token": "time_outlined", "color": "blue"}}, {"tag": "hr"}]
     for i, v in enumerate(analyzed_videos, 1):
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"## 🍉 {i}. {v.get('title', '重磅访谈提取')}"}})
@@ -389,6 +391,7 @@ def build_youtube_feishu_card(analyzed_videos):
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**\n<font color='grey'>{v.get('core_thesis', '')}</font>\n\n**🧱 论点与证据链**\n<font color='grey'>{args_text}</font>\n\n**🧠 反共识与认知盲区**\n<font color='grey'>{v.get('counter_consensus', '')}</font>\n\n**💼 产业与投资推演**\n<font color='grey'>{v.get('implications', '')}</font>"}})
         elements.append({"tag": "hr"})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "*📅 本内容基于 AI 对长视频自动提取与分析，保留时间轴结构，方便定位原声核实。*"}})
+    
     return {"msg_type": "interactive", "card": {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管深极客"}, "subtitle": {"tag": "plain_text", "content": f"长内容认知折叠 | {date_str}"}, "template": "purple", "ud_icon": {"tag": "standard_icon", "token": "video_outlined"}}, "elements": elements}}
 
 def push_to_feishu(card_payload):
@@ -400,20 +403,24 @@ def push_to_feishu(card_payload):
 
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V1.7 钛合金装甲版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V1.9 战神版) 启动")
     print("=" * 60)
+    
     track_state = load_tracking_state()
     rss_videos = scan_rss_channels(track_state)
     vip_videos = scan_vip_interviews(track_state)
     all_videos = rss_videos + vip_videos
+    
     if not all_videos:
         print("📭 过去24小时没有找到任何符合标准的硬核视频。")
         save_tracking_state(track_state)
         return
+        
     ready_videos = fetch_transcripts(all_videos)
     analyzed_data = llm_deep_analysis(ready_videos)
     card = build_youtube_feishu_card(analyzed_data)
     push_to_feishu(card)
+    
     save_tracking_state(track_state)
     print("\n🎉 YouTube 深度情报提取流执行完毕！")
 
