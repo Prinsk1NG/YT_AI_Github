@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v1.6 (Scrapeless API 强力驱动版)
-Architecture: RSS + Native Search -> yt-dlp / Scrapeless Web Unlocker -> Claude 3.7 -> Feishu
+youtube_auto_task.py  v1.7 (钛合金装甲版：三引擎并联 + 极客 Debug)
+Architecture: RSS + Native Search -> API/yt-dlp/Scrapeless -> Claude 3.7 -> Feishu
 """
 
 import os
 import re
 import json
 import time
+import sys
 import datetime
 from datetime import timezone, timedelta
 from pathlib import Path
@@ -91,35 +92,23 @@ def parse_views(view_str):
 # 🚀 独家黑科技：Scrapeless 防爆网页请求器
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_html_anti_bot(url):
-    """通过 Scrapeless API 或直连获取页面 HTML，完美绕过 CAPTCHA"""
     if SCRAPELESS_API_KEY:
         try:
             api_url = "https://api.scrapeless.com/api/v1/scraper/request"
-            payload = {
-                "actor": "scraper.webunlocker",
-                "input": {"url": url}
-            }
+            payload = {"actor": "scraper.webunlocker", "input": {"url": url}}
             headers = {"x-api-token": SCRAPELESS_API_KEY, "Content-Type": "application/json"}
-            # 必须绕过本地代理直接请求 Scrapeless API
             resp = requests.post(api_url, json=payload, headers=headers, proxies={"http": None, "https": None}, timeout=45)
-            
             try:
                 json_res = resp.json()
-                # 兼容 Scrapeless 的返回结构
                 if "data" in json_res and "body" in json_res["data"]: return json_res["data"]["body"]
                 if "data" in json_res and "html" in json_res["data"]: return json_res["data"]["html"]
                 if "html" in json_res: return json_res["html"]
-            except:
-                pass
+            except: pass
             return resp.text
         except Exception as e:
-            print(f"  ⚠️ Scrapeless API 解锁失败，尝试回退直连: {e}")
+            print(f"  ⚠️ Scrapeless 解锁失败，尝试回退直连: {e}")
 
-    # 兜底原生直连
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.9"}
     return requests.get(url, headers=headers, timeout=15).text
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -220,12 +209,15 @@ def scan_vip_interviews(tracking_state):
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: 无敌装甲字幕引擎 (已接入 Scrapeless)
+# Phase 2: 钛合金装甲字幕引擎 (三引擎无缝接力)
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 正在挂载装甲字幕引擎 (Scrapeless 防屏蔽机制启动)...")
-    os.system("python -m pip install -q yt-dlp")
+    print("\n[提取] 正在挂载装甲字幕引擎 (开启三引擎协同防爆机制)...")
+    
+    # 确保依赖存在
+    os.system(f"{sys.executable} -m pip install -q yt-dlp youtube-transcript-api")
     import subprocess
+    from youtube_transcript_api import YouTubeTranscriptApi
 
     valid_videos = []
     seen_ids = set()
@@ -236,65 +228,87 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         full_text = ""
         
-        # 方案 1: yt-dlp 解析
+        # 🟢 引擎 1: 高速 API 抓取 (带代理穿透)
         try:
-            cmd = ["yt-dlp", "--dump-json", "--skip-download"]
-            if YT_PROXY: cmd.extend(["--proxy", YT_PROXY])
-            cmd.append(f"https://www.youtube.com/watch?v={vid}")
-            
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
-            if res.returncode == 0:
-                info = json.loads(res.stdout)
-                subs = info.get('subtitles', {})
-                auto_subs = info.get('automatic_captions', {})
-                
-                chosen_track = None
-                for lang in ['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'ko']:
-                    if lang in subs: chosen_track = subs[lang]; break
-                    if lang in auto_subs: chosen_track = auto_subs[lang]; break
-                if not chosen_track:
-                    if subs: chosen_track = list(subs.values())[0]
-                    elif auto_subs: chosen_track = list(auto_subs.values())[0]
-                    
-                if chosen_track:
-                    target_url = next((f['url'] for f in chosen_track if f.get('ext') == 'json3'), chosen_track[0]['url'])
-                    t_resp = requests.get(target_url, timeout=15)
-                    try:
-                        t_data = t_resp.json()
-                        full_text = " ".join([seg['utf8'] for e in t_data.get('events', []) for seg in e.get('segs', []) if 'utf8' in seg])
-                    except:
-                        raw = re.sub(r'<[^>]+>', ' ', t_resp.text)
-                        full_text = html.unescape(re.sub(r'[\d:\.\->]+', ' ', raw))
-        except: pass
+            proxies = {"http": YT_PROXY, "https": YT_PROXY} if YT_PROXY else None
+            t_list = YouTubeTranscriptApi.get_transcript(vid, languages=['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US'], proxies=proxies)
+            full_text = " ".join([x['text'] for x in t_list])
+        except Exception as e1:
+            try:
+                # 兜底：不限制语言强抓
+                t_list = YouTubeTranscriptApi.get_transcript(vid, proxies=proxies)
+                full_text = " ".join([x['text'] for x in t_list])
+            except Exception as e1_2:
+                print(f"  [Debug] 引擎1(API) 抓取失败: {str(e1_2).split(chr(10))[0][:60]}")
 
-        # 方案 2: Scrapeless API 暴力抓取页面源码提取字幕链接
+        # 🟡 引擎 2: yt-dlp 强穿透解析
         if not full_text or len(full_text) < 500:
+            try:
+                # 使用 sys.executable 绝对路径，彻底解决 GitHub Actions 中找不到命令的问题
+                cmd = [sys.executable, "-m", "yt_dlp", "--dump-json", "--skip-download"]
+                if YT_PROXY: cmd.extend(["--proxy", YT_PROXY])
+                cmd.append(f"https://www.youtube.com/watch?v={vid}")
+                
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+                if res.returncode == 0:
+                    info = json.loads(res.stdout)
+                    subs = info.get('subtitles', {})
+                    auto_subs = info.get('automatic_captions', {})
+                    
+                    chosen_track = None
+                    for lang in ['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US']:
+                        if lang in subs: chosen_track = subs[lang]; break
+                        if lang in auto_subs: chosen_track = auto_subs[lang]; break
+                    if not chosen_track:
+                        if subs: chosen_track = list(subs.values())[0]
+                        elif auto_subs: chosen_track = list(auto_subs.values())[0]
+                        
+                    if chosen_track:
+                        target_url = next((f['url'] for f in chosen_track if f.get('ext') == 'json3'), chosen_track[0]['url'])
+                        t_resp = requests.get(target_url, timeout=15, proxies={"http": YT_PROXY, "https": YT_PROXY} if YT_PROXY else None)
+                        try:
+                            t_data = t_resp.json()
+                            full_text = " ".join([seg.get('utf8', '') for e in t_data.get('events', []) for seg in e.get('segs', [])])
+                        except:
+                            # VTT 强洗
+                            raw = re.sub(r'<[^>]+>', ' ', t_resp.text)
+                            full_text = html.unescape(re.sub(r'[\d:\.\->]+', ' ', raw))
+                else:
+                    print(f"  [Debug] 引擎2(yt-dlp) 执行错误: {res.stderr.strip()[:60]}")
+            except Exception as e2: 
+                print(f"  [Debug] 引擎2(yt-dlp) 崩溃: {e2}")
+
+        # 🔴 引擎 3: Scrapeless 强解底包 (最强备胎)
+        if (not full_text or len(full_text) < 500) and SCRAPELESS_API_KEY:
             try:
                 html_text = fetch_html_anti_bot(f"https://www.youtube.com/watch?v={vid}")
-                html_text = html_text.replace('\\u0026', '&').replace('\\/', '/')
-                urls = re.findall(r'"baseUrl":"(https://[^\"]+/api/timedtext[^\"]+)"', html_text)
-                if urls:
-                    t_resp = requests.get(urls[0], proxies={"http": None, "https": None}, timeout=15)
-                    texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
-                    full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
-            except: pass
-                
-        # 方案 3: YouTubeTranscriptApi 遗留接口调用
-        if not full_text or len(full_text) < 500:
-            try:
-                from youtube_transcript_api import YouTubeTranscriptApi
-                t_list = YouTubeTranscriptApi.get_transcript(vid)
-                full_text = " ".join([x['text'] for x in t_list])
-            except: pass
+                # 不用脆弱的正测猜链接，直接生抠官方核心 JSON
+                match = re.search(r'ytInitialPlayerResponse\s*=\s*(\{.+?\});', html_text)
+                if match:
+                    data = json.loads(match.group(1))
+                    tracks = data.get('captions', {}).get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
+                    if tracks:
+                        target_url = tracks[0]['baseUrl']
+                        for t in tracks:
+                            if 'zh' in t.get('languageCode', '') or 'en' in t.get('languageCode', ''):
+                                target_url = t['baseUrl']; break
+                        t_resp = requests.get(target_url, proxies={"http": None, "https": None}, timeout=15)
+                        texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
+                        full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
+                else:
+                    print("  [Debug] 引擎3(Scrapeless) 未能在此视频页找到 JSON 结构")
+            except Exception as e3: 
+                print(f"  [Debug] 引擎3(Scrapeless) 解析失败: {e3}")
 
-        # 验证与录入
+        # --- 最终验证与录入 ---
         full_text = " ".join(full_text.split())
-        if len(full_text) > 1000:
+        if len(full_text) > 800:
             v["transcript"] = full_text
             valid_videos.append(v)
-            print(f"  ✅ [{v['author']}] {v['title'][:25]}... ({len(full_text)} 字)")
+            print(f"  ✅ [{v['author'][:10]}] {v['title'][:25]}... ({len(full_text)} 字)")
         else:
-            print(f"  ❌ 跳过 [{v['title'][:20]}]: 无法突破YouTube防线获取字幕")
+            # 极少部分视频是真的没有字幕！这里打出结论
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: 三大引擎均无法获取内容 (大概率原视频未开启字幕)")
             
     return valid_videos
 
@@ -386,7 +400,7 @@ def push_to_feishu(card_payload):
 
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (Scrapeless强力穿透版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V1.7 钛合金装甲版) 启动")
     print("=" * 60)
     track_state = load_tracking_state()
     rss_videos = scan_rss_channels(track_state)
