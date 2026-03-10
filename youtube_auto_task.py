@@ -1,53 +1,439 @@
-name: YouTube 播客深研情报引擎
+# -*- coding: utf-8 -*-
+"""
+youtube_auto_task.py  v1.1 (原生搜索防爆版)
+Architecture: RSS + Native Search (Dual Track) -> Transcript API -> Claude 3.7 / Kimi -> Feishu
+"""
 
-on:
-  # 每天北京时间早上 8:00 执行一次 (UTC 时间 0:00)
-  schedule:
-    - cron: '0 0 * * *'
-  # 允许在 GitHub 网页端手动点击运行
-  workflow_dispatch:
+import os
+import re
+import json
+import time
+import datetime
+from datetime import timezone, timedelta
+from pathlib import Path
 
-# 必须赋予 GitHub Actions 写入代码仓库的权限，以便更新并保存 tracking 状态
-permissions:
-  contents: write
+import requests
+import feedparser
+from youtube_transcript_api import YouTubeTranscriptApi
 
-jobs:
-  run-youtube-tracker:
-    runs-on: ubuntu-latest
+# ── Environment variables ────────────────────────────────────────────────────
+FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+KIMI_API_KEY       = os.getenv("KIMI_API_KEY", "")
 
-    steps:
-      # 1. 检出代码
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+# ── Tracking & Thresholds ────────────────────────────────────────────────────
+MIN_DURATION_SEC = 15 * 60   # 最短 15 分钟（过滤切片）
+MIN_VIEWS        = 5000      # 搜索轨最低播放量（过滤小号）
+EVICTION_DAYS    = 30        # 30天无动态自动剔除
 
-      # 2. 设置 Python 环境
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+# ── 50 大核心频道 (Channel ID -> Info) ─────────────────────────────────────────
+CORE_CHANNELS = {
+    # 海外顶级对谈 / 播客
+    "UC1yNl2E66ZzKApQdRu53wwA": {"name": "Lex Fridman", "cat": "深度播客"},
+    "UCcefcZRL2oaA_uBNeo5UOWg": {"name": "a16z", "cat": "顶级VC"},
+    "UCaOtN7i8H72E7Uj4P1-QzQA": {"name": "Dwarkesh Patel", "cat": "深度播客"},
+    "UC0vOXJzXQGoqYq4n1-YkH-w": {"name": "All-In Podcast", "cat": "商业创投"},
+    "UCcefcZRL2oaA_uBNeo5UOWh": {"name": "Y Combinator", "cat": "顶级VC"},
+    # 海外硬核技术
+    "UCLNgu_OupwoeESgtab33CCw": {"name": "Andrej Karpathy", "cat": "硬核技术"},
+    "UCbfYPyITQ-7l4upoX8nvctg": {"name": "Two Minute Papers", "cat": "学术前沿"},
+    "UC3XGzPbbB1_xR0Q8z_K3_ww": {"name": "AI Explained", "cat": "深度评测"},
+}
 
-      # 3. 安装依赖库
-      # 🚨 已移除报错的 youtube-search-python，采用原生高速抓取
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests feedparser youtube-transcript-api
+# ── 30 大流动超级节点 (VIP Search Track) ───────────────────────────────────────
+VIP_LIST = [
+    "Elon Musk", "Sam Altman", "Jensen Huang", "Ilya Sutskever", 
+    "Dario Amodei", "Yann LeCun", "Mark Zuckerberg", "Demis Hassabis", 
+    "Andrej Karpathy", "Satya Nadella", "Kevin Scott",
+    "王小川 AI", "杨植麟", "朱啸虎 AI", "陆奇", "李彦宏", "傅盛"
+]
 
-      # 4. 运行 Python 自动化脚本
-      - name: Run YouTube Tracker Script
-        env:
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-        run: |
-          python youtube_auto_task.py
+def load_tracking_state():
+    path = Path("data/yt_tracking.json")
+    if path.exists():
+        try:
+            return json.loads(path.read_text("utf-8"))
+        except:
+            pass
+    return {"channels": {}, "vips": {}}
 
-      # 5. 自动保存"长期记忆"状态文件回代码仓库
-      - name: Commit and push tracking state
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add data/yt_tracking.json
-          # 如果文件有变化就提交，没变化就忽略
-          git commit -m "chore: 自动更新 YouTube 追踪与淘汰状态 [skip ci]" || echo "No changes to commit"
-          git push
+def save_tracking_state(state):
+    path = Path("data/yt_tracking.json")
+    path.parent.mkdir(exist_ok=True, parents=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+
+def parse_duration(duration_str):
+    if not duration_str: return 0
+    parts = str(duration_str).split(':')
+    secs = 0
+    for part in parts:
+        secs = secs * 60 + int(part.replace(',', '').strip())
+    return secs
+
+def parse_views(view_str):
+    if not view_str: return 0
+    view_str = str(view_str).lower().replace(',', '')
+    if 'k' in view_str:
+        num = re.search(r'[\d\.]+', view_str)
+        return int(float(num.group()) * 1000) if num else 0
+    if 'm' in view_str:
+        num = re.search(r'[\d\.]+', view_str)
+        return int(float(num.group()) * 1000000) if num else 0
+    if '万' in view_str:
+        num = re.search(r'[\d\.]+', view_str)
+        return int(float(num.group()) * 10000) if num else 0
+    num = re.search(r'\d+', view_str)
+    return int(num.group()) if num else 0
+
+# ════════════════════════════════════════════════════════════════════════════
+# 🚀 独家黑科技：原生 YouTube 搜索解析引擎 (彻底干掉报错的第三方库)
+# ════════════════════════════════════════════════════════════════════════════
+def native_youtube_search(query, limit=5):
+    # sp=CAI%253D 表示按上传时间(Latest)排序
+    url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}&sp=CAI%253D"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9", # 强制返回英文界面，方便正则解析 views
+    }
+    
+    results = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        html = resp.text
+        
+        # 提取 YouTube 页面里隐藏的包含所有视频数据的巨型 JSON
+        match = re.search(r'var ytInitialData = (\{.*?\});</script>', html)
+        if not match:
+            return results
+            
+        data = json.loads(match.group(1))
+        # 解析层级结构找视频列表
+        contents = data.get('contents', {}).get('twoColumnSearchResultsRenderer', {}).get('primaryContents', {}).get('sectionListRenderer', {}).get('contents', [])
+        if not contents: return results
+        
+        video_items = contents[0].get('itemSectionRenderer', {}).get('contents', [])
+        
+        for item in video_items:
+            if 'videoRenderer' in item:
+                vr = item['videoRenderer']
+                vid = vr.get('videoId')
+                title = vr.get('title', {}).get('runs', [{}])[0].get('text', '')
+                channel = vr.get('ownerText', {}).get('runs', [{}])[0].get('text', '')
+                pub_time = vr.get('publishedTimeText', {}).get('simpleText', '')
+                view_count_str = vr.get('viewCountText', {}).get('simpleText', '0')
+                duration_str = vr.get('lengthText', {}).get('simpleText', '0:00')
+                
+                results.append({
+                    "id": vid,
+                    "title": title,
+                    "channel": channel,
+                    "publishedTime": pub_time,
+                    "viewCount": view_count_str,
+                    "duration": duration_str
+                })
+                if len(results) >= limit:
+                    break
+    except Exception as e:
+        print(f"  ⚠️ 原生解析异常: {e}")
+        
+    return results
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 1: 轨道 A - RSS 订阅无损雷达扫描 (固定频道)
+# ════════════════════════════════════════════════════════════════════════════
+def scan_rss_channels(tracking_state, time_limit_hours=24):
+    print(f"\n[轨道A] 正在通过 RSS 扫描 {len(CORE_CHANNELS)} 个核心频道...")
+    now = datetime.datetime.now(timezone.utc)
+    deadline = now - timedelta(hours=time_limit_hours)
+    results = []
+    
+    for ch_id, info in CORE_CHANNELS.items():
+        last_active = tracking_state["channels"].get(ch_id, now.isoformat())
+        last_date = datetime.datetime.fromisoformat(last_active)
+        if (now - last_date).days > EVICTION_DAYS:
+            print(f"  ⏳ [淘汰] 频道 {info['name']} 已超过 {EVICTION_DAYS} 天无高质量更新，本次跳过。")
+            continue
+
+        try:
+            feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={ch_id}")
+            has_new = False
+            for entry in feed.entries:
+                pub_time = datetime.datetime.strptime(entry.published, "%Y-%m-%dT%H:%M:%S%z")
+                if pub_time > deadline:
+                    has_new = True
+                    results.append({
+                        "video_id": entry.yt_videoid,
+                        "title": entry.title,
+                        "author": info["name"],
+                        "category": info["cat"],
+                        "pub_time": pub_time.strftime("%Y-%m-%d"),
+                        "source": "RSS"
+                    })
+            if has_new:
+                tracking_state["channels"][ch_id] = now.isoformat()
+        except Exception:
+            pass
+            
+    print(f"[轨道A] 扫描完成，发现 {len(results)} 个最新视频。")
+    return results
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 1.5: 轨道 B - VIP 大佬全网关键词捕获 (流动节点)
+# ════════════════════════════════════════════════════════════════════════════
+def scan_vip_interviews(tracking_state):
+    print(f"\n[轨道B] 正在全网搜索 {len(VIP_LIST)} 位 VIP 大佬的最新访谈...")
+    now = datetime.datetime.now(timezone.utc)
+    results = []
+    
+    for vip in VIP_LIST:
+        last_active = tracking_state["vips"].get(vip, now.isoformat())
+        last_date = datetime.datetime.fromisoformat(last_active)
+        if (now - last_date).days > EVICTION_DAYS:
+            print(f"  ⏳ [降级] 大佬 {vip} 近期无高质量发声，本次跳过。")
+            continue
+
+        try:
+            query = f'"{vip}" (interview OR podcast OR 访谈)'
+            # 调用全新手写的无依赖原生搜索库
+            search_res = native_youtube_search(query, limit=5)
+            
+            has_valid = False
+            for vid in search_res:
+                pub_time_str = vid.get("publishedTime", "")
+                # 过滤只看 24 小时内的（过滤掉 year/month/weeks）
+                if not pub_time_str or ("year" in pub_time_str or "month" in pub_time_str or "week" in pub_time_str):
+                    continue
+                    
+                duration = vid.get("duration", "0:00")
+                if parse_duration(duration) < MIN_DURATION_SEC:
+                    continue
+                    
+                views = parse_views(vid.get("viewCount", "0"))
+                if views < MIN_VIEWS:
+                    continue
+                
+                has_valid = True
+                results.append({
+                    "video_id": vid["id"],
+                    "title": vid["title"],
+                    "author": vid.get("channel", "Unknown Channel"),
+                    "category": f"大佬追踪: {vip}",
+                    "pub_time": "Today",
+                    "source": "Search"
+                })
+            
+            if has_valid:
+                tracking_state["vips"][vip] = now.isoformat()
+                
+            time.sleep(1) # 防止被封
+            
+        except Exception as e:
+            print(f"  ⚠️ 搜索 {vip} 失败: {e}")
+            
+    print(f"[轨道B] 扫描完成，捕获 {len(results)} 个 VIP 高质长视频。")
+    return results
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 2: 字幕扒取引擎 (极度容错版)
+# ════════════════════════════════════════════════════════════════════════════
+def fetch_transcripts(video_list):
+    print("\n[提取] 开始下载全量字幕 (已开启饥不择食兜底模式)...")
+    valid_videos = []
+    seen_ids = set()
+    
+    for v in video_list:
+        vid = v["video_id"]
+        if vid in seen_ids: continue
+        seen_ids.add(vid)
+        
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(vid)
+            t = None
+            # 策略1：优先寻找英文或中文（不管是人工还是机器生成）
+            try:
+                t = transcript_list.find_transcript(['en', 'zh', 'zh-Hans', 'zh-Hant'])
+            except:
+                # 策略2：饥不择食模式！只要有字幕，不管是哪国语言，先抓下来，Claude自己会翻译
+                available_transcripts = list(transcript_list._manually_created_transcripts.values()) + list(transcript_list._generated_transcripts.values())
+                if available_transcripts:
+                    t = available_transcripts[0] # 直接拿第一个
+            
+            if not t:
+                raise Exception("该视频完全不存在任何语言的字幕")
+
+            transcript = t.fetch()
+            full_text = " ".join([item['text'] for item in transcript])
+            
+            if len(full_text) > 1500:
+                v["transcript"] = full_text
+                valid_videos.append(v)
+                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {t.language})")
+            else:
+                print(f"  ⚠️ 字幕过短丢弃: {v['title'][:20]}")
+                
+        except Exception as e:
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: {e}")
+            
+    return valid_videos
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 3: LLM 金字塔提炼引擎 (Claude 3.7 / Kimi)
+# ════════════════════════════════════════════════════════════════════════════
+def llm_deep_analysis(videos):
+    if not videos: return []
+        
+    print(f"\n[大脑] 提交 {len(videos)} 个长视频给 LLM 进行金字塔分析...")
+    
+    payload = []
+    for v in videos:
+        txt = v["transcript"]
+        if len(txt) > 30000:
+            txt = txt[:15000] + "\n...[中段省略]...\n" + txt[-15000:]
+        payload.append({
+            "channel": v["author"], "title": v["title"],
+            "tag": v["category"], "text": txt
+        })
+        
+    prompt = f"""你是顶级硅谷创投分析师。以下是过去24小时内YouTube高价值AI对谈/讲座的全量字幕。
+请使用「金字塔原理」对这些长内容进行降维打击级的深度拆解。
+
+【原始数据（含噪音和废话）】：
+{json.dumps(payload, ensure_ascii=False)}
+
+【处理要求】：
+1. 剔除广告、口水话，只保留对商业、技术、创投有真正启发的视频。
+2. 严格按以下 JSON 格式输出结果（严禁输出额外文字）：
+
+@@@START@@@
+{{
+  "videos": [
+    {{
+      "category": "原数据的 tag (如：深度播客 / 大佬追踪: Elon Musk)",
+      "channel": "原频道名",
+      "title": "重新拟定一个极具深度的中文标题 (如：Dwarkesh对话Dario：Scaling Law的终局)",
+      "tldr": "💡【TL;DR】一句话总结视频的核心结论 (50字内)",
+      "core_thesis": "🎯 核心主张：受访者提出的最核心逻辑或预测",
+      "arguments": [
+        "• [时间锚点] 论点一及证据 (例如：[前期] 算力集群规模将决定生死：他预测下代模型训练需百亿美金)",
+        "• [时间锚点] 论点二及证据"
+      ],
+      "counter_consensus": "🧠 反共识认知：视频中打破了哪些大众的常规偏见？",
+      "implications": "💼 产业与投资推演：对当前一级市场、硬件赛道或应用层的具体影响"
+    }}
+  ]
+}}
+@@@END@@@
+"""
+    
+    if OPENROUTER_API_KEY:
+        try:
+            print("  ➡️ 调用 Claude 3.7 Sonnet 中...")
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5, "max_tokens": 10000},
+                timeout=240,
+            )
+            resp.raise_for_status()
+            return _extract_json(resp.json()["choices"][0]["message"]["content"].strip())
+        except Exception as e:
+            print(f"  ❌ Claude 失败，尝试 Kimi 兜底: {e}")
+
+    if KIMI_API_KEY:
+        try:
+            print("  ➡️ 调用 Kimi 32k 兜底中...")
+            resp = requests.post(
+                "https://api.moonshot.cn/v1/chat/completions",
+                headers={"Authorization": f"Bearer {KIMI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "moonshot-v1-32k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5},
+                timeout=240,
+            )
+            resp.raise_for_status()
+            return _extract_json(resp.json()["choices"][0]["message"]["content"])
+        except Exception as e:
+            print(f"  ❌ Kimi 兜底失败: {e}")
+            
+    return []
+
+def _extract_json(text):
+    try:
+        start = text.find("@@@START@@@") + 11
+        end = text.find("@@@END@@@")
+        if start > 10 and end > -1:
+            json_str = text[start:end].strip()
+        else:
+            json_str = text.strip('` \njson')
+        return json.loads(json_str).get("videos", [])
+    except Exception as e:
+        print(f"解析 JSON 失败: {e}")
+        return []
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 4: Feishu 研报级卡片排版渲染
+# ════════════════════════════════════════════════════════════════════════════
+def build_youtube_feishu_card(analyzed_videos):
+    if not analyzed_videos: return None
+        
+    date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每日早8点准时更新 | 深度长视频拆解 | 认知升级引擎**"}, "icon": {"tag": "standard_icon", "token": "time_outlined", "color": "blue"}},
+        {"tag": "hr"}
+    ]
+    
+    for i, v in enumerate(analyzed_videos, 1):
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"## 🍉 {i}. {v.get('title', '重磅访谈提取')}"}})
+        base_info = f"📺 **频道/来源**：{v.get('channel', '未知频道')} | 🏷️ **标签**：{v.get('category', '科技播客')}\n{v.get('tldr', '💡【TL;DR】暂无摘要')}"
+        elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": base_info}], "background_color": "blue"})
+        
+        args_text = "\n".join(v.get('arguments', []))
+        content_md = f"**🎯 核心主张**\n<font color='grey'>{v.get('core_thesis', '')}</font>\n\n**🧱 论点与证据链**\n<font color='grey'>{args_text}</font>\n\n**🧠 反共识与认知盲区**\n<font color='grey'>{v.get('counter_consensus', '')}</font>\n\n**💼 产业与投资推演**\n<font color='grey'>{v.get('implications', '')}</font>"
+        
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content_md}})
+        elements.append({"tag": "hr"})
+        
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "*📅 本内容基于 AI 对长视频自动提取与分析，保留了时间轴结构，方便定位原声核实。*"}})
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管深极客"}, "subtitle": {"tag": "plain_text", "content": f"长内容认知折叠 | {date_str}"}, "template": "purple", "ud_icon": {"tag": "standard_icon", "token": "video_outlined"}},
+            "elements": elements
+        }
+    }
+
+def push_to_feishu(card_payload):
+    if not FEISHU_WEBHOOK_URL or not card_payload: return
+    try:
+        resp = requests.post(FEISHU_WEBHOOK_URL, json=card_payload, timeout=10)
+        print(f"✅ 飞书推送成功: {resp.status_code}")
+    except Exception as e:
+        print(f"❌ 飞书推送异常: {e}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# Main Pipeline
+# ════════════════════════════════════════════════════════════════════════════
+def main():
+    print("=" * 60)
+    print("🚀 YouTube 播客深度深研系统 (Dual-Track 原生防爆版) 启动")
+    print("=" * 60)
+    
+    track_state = load_tracking_state()
+    rss_videos = scan_rss_channels(track_state)
+    vip_videos = scan_vip_interviews(track_state)
+    all_videos = rss_videos + vip_videos
+    
+    if not all_videos:
+        print("📭 过去24小时没有找到任何符合标准的硬核视频。")
+        save_tracking_state(track_state)
+        return
+        
+    ready_videos = fetch_transcripts(all_videos)
+    analyzed_data = llm_deep_analysis(ready_videos)
+    card = build_youtube_feishu_card(analyzed_data)
+    push_to_feishu(card)
+    save_tracking_state(track_state)
+    print("\n🎉 YouTube 深度情报提取流执行完毕！")
+
+if __name__ == "__main__":
+    main()
