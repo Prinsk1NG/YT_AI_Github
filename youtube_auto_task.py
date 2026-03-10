@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v1.1 (原生搜索防爆版)
-Architecture: RSS + Native Search (Dual Track) -> Transcript API -> Claude 3.7 / Kimi -> Feishu
+youtube_auto_task.py  v1.2 (终极防爆版：零依赖原生搜索 + 零依赖原生字幕提取)
+Architecture: RSS + Native Search (Dual Track) -> Native Transcript API -> Claude 3.7 / Kimi -> Feishu
 """
 
 import os
@@ -11,10 +11,10 @@ import time
 import datetime
 from datetime import timezone, timedelta
 from pathlib import Path
+import html  # 用于原生字幕转义
 
 import requests
 import feedparser
-from youtube_transcript_api import YouTubeTranscriptApi
 
 # ── Environment variables ────────────────────────────────────────────────────
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
@@ -86,28 +86,25 @@ def parse_views(view_str):
     return int(num.group()) if num else 0
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 独家黑科技：原生 YouTube 搜索解析引擎 (彻底干掉报错的第三方库)
+# 🚀 独家黑科技 1：原生 YouTube 搜索解析引擎
 # ════════════════════════════════════════════════════════════════════════════
 def native_youtube_search(query, limit=5):
-    # sp=CAI%253D 表示按上传时间(Latest)排序
     url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}&sp=CAI%253D"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9", # 强制返回英文界面，方便正则解析 views
+        "Accept-Language": "en-US,en;q=0.9", 
     }
     
     results = []
     try:
         resp = requests.get(url, headers=headers, timeout=15)
-        html = resp.text
+        html_text = resp.text
         
-        # 提取 YouTube 页面里隐藏的包含所有视频数据的巨型 JSON
-        match = re.search(r'var ytInitialData = (\{.*?\});</script>', html)
+        match = re.search(r'var ytInitialData = (\{.*?\});</script>', html_text)
         if not match:
             return results
             
         data = json.loads(match.group(1))
-        # 解析层级结构找视频列表
         contents = data.get('contents', {}).get('twoColumnSearchResultsRenderer', {}).get('primaryContents', {}).get('sectionListRenderer', {}).get('contents', [])
         if not contents: return results
         
@@ -194,13 +191,11 @@ def scan_vip_interviews(tracking_state):
 
         try:
             query = f'"{vip}" (interview OR podcast OR 访谈)'
-            # 调用全新手写的无依赖原生搜索库
             search_res = native_youtube_search(query, limit=5)
             
             has_valid = False
             for vid in search_res:
                 pub_time_str = vid.get("publishedTime", "")
-                # 过滤只看 24 小时内的（过滤掉 year/month/weeks）
                 if not pub_time_str or ("year" in pub_time_str or "month" in pub_time_str or "week" in pub_time_str):
                     continue
                     
@@ -225,7 +220,7 @@ def scan_vip_interviews(tracking_state):
             if has_valid:
                 tracking_state["vips"][vip] = now.isoformat()
                 
-            time.sleep(1) # 防止被封
+            time.sleep(1) 
             
         except Exception as e:
             print(f"  ⚠️ 搜索 {vip} 失败: {e}")
@@ -234,10 +229,10 @@ def scan_vip_interviews(tracking_state):
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: 字幕扒取引擎 (极度容错版)
+# 🚀 独家黑科技 2：原生零依赖字幕扒取引擎 (完全抛弃第三方库)
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 开始下载全量字幕 (已开启饥不择食兜底模式)...")
+    print("\n[提取] 开始下载全量字幕 (原生硬核解析引擎，彻底告别报错)...")
     valid_videos = []
     seen_ids = set()
     
@@ -247,32 +242,56 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         
         try:
-            transcript = None
-            # 策略1：最经典稳妥的底层API调用，按优先级尝试获取主流语言字幕
-            try:
-                transcript = YouTubeTranscriptApi.get_transcript(
-                    vid, 
-                    languages=['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru']
-                )
-            except Exception:
-                # 策略2：终极兜底，不挑食，强制拉取视频默认的任何语言字幕
-                transcript = YouTubeTranscriptApi.get_transcript(vid)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            url = f"https://www.youtube.com/watch?v={vid}"
+            resp = requests.get(url, headers=headers, timeout=15)
             
-            if not transcript:
-                raise Exception("该视频未提供任何文本字幕")
-
-            full_text = " ".join([item['text'] for item in transcript])
+            # 暴力破解：还原页面代码中的转义符
+            html_text = resp.text.replace('\\u0026', '&').replace('\\/', '/')
             
-            # 过滤过短的垃圾切片
+            # 使用正则从整个页面源码中直接生抠隐藏的字幕链接
+            urls = re.findall(r'"baseUrl":"(https://[^\"]+/api/timedtext[^\"]+)"', html_text)
+            if not urls:
+                raise Exception("原生引擎未发现任何字幕链接")
+                
+            unique_urls = list(set(urls))
+            
+            # 语言优先权重抓取逻辑
+            target_url = None
+            for pref in ['lang=zh-Hans', 'lang=zh-Hant', 'lang=zh', 'lang=en']:
+                for u in unique_urls:
+                    if pref in u:
+                        target_url = u
+                        break
+                if target_url: break
+                
+            if not target_url:
+                target_url = unique_urls[0] # 兜底随便抓取一个语言
+                
+            # 请求提取出来的字幕 XML 文件
+            t_resp = requests.get(target_url, headers=headers, timeout=15)
+            
+            # 从 XML 中提取所有的 <text> 对话内容
+            texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
+            
+            # 还原 HTML 实体符号(如 &amp;)，并去除杂乱标签
+            full_text = " ".join([html.unescape(t).replace('\n', ' ') for t in texts])
+            full_text = re.sub(r'<[^>]+>', '', full_text)
+            
             if len(full_text) > 1500:
                 v["transcript"] = full_text
                 valid_videos.append(v)
-                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符)")
+                
+                lang_match = re.search(r'lang=([^&]+)', target_url)
+                lang_name = lang_match.group(1) if lang_match else "unknown"
+                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {lang_name})")
             else:
                 print(f"  ⚠️ 字幕过短丢弃: {v['title'][:20]}")
                 
         except Exception as e:
-            # 简化报错信息，避免满屏乱码
             err_msg = str(e).split('\n')[0] if str(e) else "API限制或无字幕"
             print(f"  ❌ 跳过 [{v['title'][:20]}]: {err_msg[:60]}")
             
