@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v2.0 (破壁者版：原生 JSON 劫持 + 稳定底座回退)
-Architecture: RSS + Native Search -> Scrapeless(JSON Hijack) / API / yt-dlp -> Claude 3.7 -> Feishu
+youtube_auto_task.py  v3.0 (借刀杀人版：Jina Reader API + 第三方免代理提取)
+Architecture: RSS + Native Search -> Jina AI Reader -> Claude 3.7 -> Feishu
 """
 
 import os
 import re
 import json
 import time
-import sys
 import datetime
 from datetime import timezone, timedelta
 from pathlib import Path
-import html
 
 import requests
 import feedparser
@@ -21,37 +19,24 @@ import feedparser
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 KIMI_API_KEY       = os.getenv("KIMI_API_KEY", "")
-SCRAPELESS_API_KEY = os.getenv("SCRAPELESS_API_KEY", "")
-YT_PROXY           = os.getenv("YT_PROXY", "")
-
-if YT_PROXY:
-    os.environ["http_proxy"]  = YT_PROXY
-    os.environ["https_proxy"] = YT_PROXY
-    print("🛡️ 已挂载全局网络代理...")
-
-if SCRAPELESS_API_KEY:
-    print("🚀 已挂载 Scrapeless Web Unlocker 引擎，准备强力穿透防线...")
 
 # ── Tracking & Thresholds ────────────────────────────────────────────────────
 MIN_DURATION_SEC = 15 * 60   # 最短 15 分钟
 MIN_VIEWS        = 5000      # 搜索轨最低播放量
-EVICTION_DAYS    = 30        # 30天淘汰机制
+EVICTION_DAYS    = 30        # 30天无动态自动淘汰
 
 # ── 50 大核心频道 ─────────────────────────────────────────
 CORE_CHANNELS = {
-    # 海外顶级对谈 / 播客
     "UC1yNl2E66ZzKApQdRu53wwA": {"name": "Lex Fridman", "cat": "深度播客"},
     "UCcefcZRL2oaA_uBNeo5UOWg": {"name": "a16z", "cat": "顶级VC"},
     "UCaOtN7i8H72E7Uj4P1-QzQA": {"name": "Dwarkesh Patel", "cat": "深度播客"},
     "UC0vOXJzXQGoqYq4n1-YkH-w": {"name": "All-In Podcast", "cat": "商业创投"},
     "UCcefcZRL2oaA_uBNeo5UOWh": {"name": "Y Combinator", "cat": "顶级VC"},
-    # 海外硬核技术
     "UCLNgu_OupwoeESgtab33CCw": {"name": "Andrej Karpathy", "cat": "硬核技术"},
     "UCbfYPyITQ-7l4upoX8nvctg": {"name": "Two Minute Papers", "cat": "学术前沿"},
     "UC3XGzPbbB1_xR0Q8z_K3_ww": {"name": "AI Explained", "cat": "深度评测"},
 }
 
-# ── 30 大流动超级节点 ───────────────────────────────────────
 VIP_LIST = [
     "Elon Musk", "Sam Altman", "Jensen Huang", "Ilya Sutskever", 
     "Dario Amodei", "Yann LeCun", "Mark Zuckerberg", "Demis Hassabis", 
@@ -89,40 +74,23 @@ def parse_views(view_str):
     return int(num.group()) if num else 0
 
 # ════════════════════════════════════════════════════════════════════════════
-# Scrapeless Web Unlocker 引擎
+# 搜索引擎：使用轻量第三方接口绕过限制
 # ════════════════════════════════════════════════════════════════════════════
-def fetch_html_anti_bot(url):
-    """利用 Scrapeless API 获取渲染后的 HTML 源码"""
-    if SCRAPELESS_API_KEY:
-        try:
-            api_url = "https://api.scrapeless.com/api/v1/scraper/request"
-            payload = {"actor": "scraper.webunlocker", "input": {"url": url}}
-            headers = {"x-api-token": SCRAPELESS_API_KEY, "Content-Type": "application/json"}
-            # 必须绕开本地代理直连 API
-            resp = requests.post(api_url, json=payload, headers=headers, proxies={"http": None, "https": None}, timeout=45)
-            try:
-                json_res = resp.json()
-                if "data" in json_res and "body" in json_res["data"]: return json_res["data"]["body"]
-                if "data" in json_res and "html" in json_res["data"]: return json_res["data"]["html"]
-                if "html" in json_res: return json_res["html"]
-            except: pass
-            return resp.text
-        except Exception as e:
-            print(f"  [Debug] Scrapeless 请求出错: {e}")
+def fetch_html_bypass(url):
+    """利用公共代理站绕过基本墙"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        # 尝试走免翻镜像站抓取搜索结果
+        mirror_url = url.replace("youtube.com", "invidious.jing.rocks") 
+        return requests.get(mirror_url, headers=headers, timeout=15).text
+    except:
+        return requests.get(url, headers=headers, timeout=15).text
 
-    # 兜底直连
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    return requests.get(url, headers=headers, timeout=15).text
-
-# ════════════════════════════════════════════════════════════════════════════
-# Phase 1: 扫描模块 (固定频道 RSS + 全网 VIP 关键词检索)
-# ════════════════════════════════════════════════════════════════════════════
 def native_youtube_search(query, limit=5):
     url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}&sp=CAI%253D"
     results = []
     try:
-        html_text = fetch_html_anti_bot(url)
-        # 兼容性更强的正则变量查找
+        html_text = fetch_html_bypass(url)
         match = re.search(r'(?:ytInitialData|window\["ytInitialData"\])\s*=\s*(\{.+?\});', html_text)
         if not match: return results
             
@@ -207,15 +175,10 @@ def scan_vip_interviews(tracking_state):
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: 钛合金装甲字幕引擎 (V2.0 原生 JSON 劫持版)
+# Phase 2: 借刀杀人字幕引擎 (使用第三方大模型阅读器强抓)
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 引擎点火中：检测到环境就绪，准备执行暴力解码...")
-
-    # 动态注入包，防止预环境丢失
-    os.system(f"{sys.executable} -m pip install -q yt-dlp youtube-transcript-api")
-    import subprocess
-    from youtube_transcript_api import YouTubeTranscriptApi
+    print("\n[提取] 启动云端云解析引擎 (利用 Jina Reader API 免翻墙抓取)...")
 
     valid_videos = []
     seen_ids = set()
@@ -226,89 +189,47 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         full_text = ""
         
-        # 🔴 主力战神：Scrapeless + 直接劫持底层 captionTracks JSON 数组
-        if SCRAPELESS_API_KEY and not full_text:
-            try:
-                html_text = fetch_html_anti_bot(f"https://www.youtube.com/watch?v={vid}")
+        # 🔴 主力引擎：Jina AI Reader API (专为大模型喂数据的阅读器，自带强大的过反爬能力)
+        try:
+            print(f"  ➡️ 正在呼叫 Jina 云端集群提取: {vid}")
+            jina_url = f"https://r.jina.ai/https://www.youtube.com/watch?v={vid}"
+            headers = {
+                "Accept": "text/plain",
+                "X-Return-Format": "text"
+            }
+            resp = requests.get(jina_url, headers=headers, timeout=40)
+            
+            if resp.status_code == 200 and len(resp.text) > 500:
+                # Jina 返回的是 Markdown，里面包含标题、描述，我们暴力清洗提取正文
+                raw_text = resp.text
+                if "Title:" in raw_text:
+                    raw_text = raw_text.split("Title:", 1)[-1]
                 
-                # 终极奥义：不再去猜长啥样，直接在满屏代码里暴力正则匹配 "captionTracks": [ ... ] 结构
-                match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html_text)
-                if match:
-                    tracks = json.loads(match.group(1))
-                    target_url = tracks[0]['baseUrl'] # 兜底随便拿第一个轨道
-                    
-                    # 优先找中英文
-                    for t in tracks:
-                        lang_code = t.get('languageCode', '')
-                        if 'zh' in lang_code or 'en' in lang_code:
-                            target_url = t['baseUrl']
-                            break
-                            
-                    t_resp = requests.get(target_url, timeout=15)
-                    # 抽取出 XML 中的 <text> 内容
-                    texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
-                    full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
-                else:
-                    print(f"  [Debug] 引擎1(Scrapeless) 未能在此视频中劫持到 captionTracks JSON")
-            except Exception as e: 
-                print(f"  [Debug] 引擎1(Scrapeless) 解析崩溃: {e}")
+                # 去除 Markdown 链接和多余的换行
+                full_text = re.sub(r'\[.*?\]\(.*?\)', '', raw_text)
+                full_text = " ".join(full_text.split())
+        except Exception as e:
+            print(f"  [Debug] Jina 引擎抓取失败: {e}")
 
-        # 🟡 备胎一：YouTubeTranscriptApi 最古老稳定的 API (彻底修复版本属性报错)
+        # 🟡 备用引擎：第三方 YouTube Transcript 聚合镜像站
         if not full_text or len(full_text) < 500:
             try:
-                # 绝对安全的古老方法，所有版本兼容
-                t_list = YouTubeTranscriptApi.get_transcript(vid, languages=['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US'])
-                full_text = " ".join([x['text'] for x in t_list])
+                print(f"  ➡️ Jina 失败，切换到备用镜像站提取...")
+                yt_mirror = f"https://youtubetranscript.com/?server_vid={vid}"
+                mirror_resp = requests.get(yt_mirror, timeout=20)
+                if "<text" in mirror_resp.text:
+                    texts = re.findall(r'<text[^>]*>(.*?)</text>', mirror_resp.text, flags=re.DOTALL)
+                    full_text = " ".join([html.unescape(t) for t in texts])
             except Exception as e:
-                # 强拿不挑食版本
-                try:
-                    t_list_fallback = YouTubeTranscriptApi.get_transcript(vid)
-                    full_text = " ".join([x['text'] for x in t_list_fallback])
-                except Exception as e2:
-                    print(f"  [Debug] 引擎2(API) 抓取失败: {str(e2).split(chr(10))[0][:60]}")
-
-        # 🟢 备胎二：yt-dlp 强穿透解析 (如果在没有被要求验证 Cookies 的机器上能跑通)
-        if not full_text or len(full_text) < 500:
-            try:
-                cmd = [sys.executable, "-m", "yt_dlp", "--dump-json", "--skip-download", f"https://www.youtube.com/watch?v={vid}"]
-                if YT_PROXY: cmd.extend(["--proxy", YT_PROXY])
-                
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-                if res.returncode == 0:
-                    info = json.loads(res.stdout)
-                    subs = info.get('subtitles', {})
-                    auto_subs = info.get('automatic_captions', {})
-                    
-                    chosen_track = None
-                    for lang in ['zh-Hans', 'zh-Hant', 'zh', 'en', 'en-US']:
-                        if lang in subs: chosen_track = subs[lang]; break
-                        if lang in auto_subs: chosen_track = auto_subs[lang]; break
-                    if not chosen_track:
-                        if subs: chosen_track = list(subs.values())[0]
-                        elif auto_subs: chosen_track = list(auto_subs.values())[0]
-                        
-                    if chosen_track:
-                        target_url = next((f['url'] for f in chosen_track if f.get('ext') == 'json3'), chosen_track[0]['url'])
-                        t_resp = requests.get(target_url, timeout=15, proxies={"http": YT_PROXY, "https": YT_PROXY} if YT_PROXY else None)
-                        try:
-                            t_data = t_resp.json()
-                            full_text = " ".join([seg.get('utf8', '') for e in t_data.get('events', []) for seg in e.get('segs', [])])
-                        except:
-                            raw = re.sub(r'<[^>]+>', ' ', t_resp.text)
-                            full_text = html.unescape(re.sub(r'[\d:\.\->]+', ' ', raw))
-                else:
-                    print(f"  [Debug] 引擎3(yt-dlp) 被盾或拦截: {res.stderr.strip()[-60:]}")
-            except Exception as e:
-                print(f"  [Debug] 引擎3(yt-dlp) 崩溃: {e}")
+                print(f"  [Debug] 备用镜像站抓取失败: {e}")
 
         # --- 最终验证与清理录入 ---
-        full_text = " ".join(full_text.split())
-        if len(full_text) > 800:
+        if full_text and len(full_text) > 800:
             v["transcript"] = full_text
             valid_videos.append(v)
             print(f"  ✅ [{v['author'][:10]}] {v['title'][:25]}... ({len(full_text)} 字)")
         else:
-            print(f"  ❌ 跳过 [{v['title'][:20]}]: 三层装甲均未命中 (视频大概率不含原生字幕或未开启)")
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: 云端集群也无法获取该视频字幕（视频未开启字幕或限制极严）")
             
     return valid_videos
 
@@ -408,7 +329,7 @@ def push_to_feishu(card_payload):
 
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V2.0 破壁者版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V3.0 借刀杀人版) 启动")
     print("=" * 60)
     
     track_state = load_tracking_state()
