@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v1.3 (终极抗脆弱版：底层内部API字幕提取)
-Architecture: RSS + Native Search (Dual Track) -> Internal API Transcript -> Claude 3.7 / Kimi -> Feishu
+youtube_auto_task.py  v1.4 (无敌装甲版：内嵌 yt-dlp 终极反屏蔽)
+Architecture: RSS + Native Search -> yt-dlp / HTML / API -> Claude 3.7 / Kimi -> Feishu
 """
 
 import os
@@ -11,7 +11,7 @@ import time
 import datetime
 from datetime import timezone, timedelta
 from pathlib import Path
-import html  # 用于原生字幕转义
+import html
 
 import requests
 import feedparser
@@ -101,8 +101,7 @@ def native_youtube_search(query, limit=5):
         html_text = resp.text
         
         match = re.search(r'var ytInitialData = (\{.*?\});</script>', html_text)
-        if not match:
-            return results
+        if not match: return results
             
         data = json.loads(match.group(1))
         contents = data.get('contents', {}).get('twoColumnSearchResultsRenderer', {}).get('primaryContents', {}).get('sectionListRenderer', {}).get('contents', [])
@@ -128,15 +127,13 @@ def native_youtube_search(query, limit=5):
                     "viewCount": view_count_str,
                     "duration": duration_str
                 })
-                if len(results) >= limit:
-                    break
+                if len(results) >= limit: break
     except Exception as e:
         print(f"  ⚠️ 原生解析异常: {e}")
-        
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 1: 轨道 A - RSS 订阅无损雷达扫描 (固定频道)
+# Phase 1: 轨道 A - RSS 订阅无损雷达扫描
 # ════════════════════════════════════════════════════════════════════════════
 def scan_rss_channels(tracking_state, time_limit_hours=24):
     print(f"\n[轨道A] 正在通过 RSS 扫描 {len(CORE_CHANNELS)} 个核心频道...")
@@ -147,9 +144,7 @@ def scan_rss_channels(tracking_state, time_limit_hours=24):
     for ch_id, info in CORE_CHANNELS.items():
         last_active = tracking_state["channels"].get(ch_id, now.isoformat())
         last_date = datetime.datetime.fromisoformat(last_active)
-        if (now - last_date).days > EVICTION_DAYS:
-            print(f"  ⏳ [淘汰] 频道 {info['name']} 已超过 {EVICTION_DAYS} 天无高质量更新，本次跳过。")
-            continue
+        if (now - last_date).days > EVICTION_DAYS: continue
 
         try:
             feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={ch_id}")
@@ -166,8 +161,7 @@ def scan_rss_channels(tracking_state, time_limit_hours=24):
                         "pub_time": pub_time.strftime("%Y-%m-%d"),
                         "source": "RSS"
                     })
-            if has_new:
-                tracking_state["channels"][ch_id] = now.isoformat()
+            if has_new: tracking_state["channels"][ch_id] = now.isoformat()
         except Exception:
             pass
             
@@ -175,7 +169,7 @@ def scan_rss_channels(tracking_state, time_limit_hours=24):
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 1.5: 轨道 B - VIP 大佬全网关键词捕获 (流动节点)
+# Phase 1.5: 轨道 B - VIP 大佬全网关键词捕获
 # ════════════════════════════════════════════════════════════════════════════
 def scan_vip_interviews(tracking_state):
     print(f"\n[轨道B] 正在全网搜索 {len(VIP_LIST)} 位 VIP 大佬的最新访谈...")
@@ -185,9 +179,7 @@ def scan_vip_interviews(tracking_state):
     for vip in VIP_LIST:
         last_active = tracking_state["vips"].get(vip, now.isoformat())
         last_date = datetime.datetime.fromisoformat(last_active)
-        if (now - last_date).days > EVICTION_DAYS:
-            print(f"  ⏳ [降级] 大佬 {vip} 近期无高质量发声，本次跳过。")
-            continue
+        if (now - last_date).days > EVICTION_DAYS: continue
 
         try:
             query = f'"{vip}" (interview OR podcast OR 访谈)'
@@ -196,16 +188,9 @@ def scan_vip_interviews(tracking_state):
             has_valid = False
             for vid in search_res:
                 pub_time_str = vid.get("publishedTime", "")
-                if not pub_time_str or ("year" in pub_time_str or "month" in pub_time_str or "week" in pub_time_str):
-                    continue
-                    
-                duration = vid.get("duration", "0:00")
-                if parse_duration(duration) < MIN_DURATION_SEC:
-                    continue
-                    
-                views = parse_views(vid.get("viewCount", "0"))
-                if views < MIN_VIEWS:
-                    continue
+                if not pub_time_str or ("year" in pub_time_str or "month" in pub_time_str or "week" in pub_time_str): continue
+                if parse_duration(vid.get("duration", "0:00")) < MIN_DURATION_SEC: continue
+                if parse_views(vid.get("viewCount", "0")) < MIN_VIEWS: continue
                 
                 has_valid = True
                 results.append({
@@ -217,22 +202,24 @@ def scan_vip_interviews(tracking_state):
                     "source": "Search"
                 })
             
-            if has_valid:
-                tracking_state["vips"][vip] = now.isoformat()
-                
+            if has_valid: tracking_state["vips"][vip] = now.isoformat()
             time.sleep(1) 
-            
-        except Exception as e:
-            print(f"  ⚠️ 搜索 {vip} 失败: {e}")
+        except Exception:
+            pass
             
     print(f"[轨道B] 扫描完成，捕获 {len(results)} 个 VIP 高质长视频。")
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 独家黑科技 2：基于内部 API 的终极稳定字幕扒取引擎
+# 🚀 独家黑科技 2：无敌装甲字幕引擎 (yt-dlp 强穿透 + 原生 HTML 兜底)
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 开始下载全量字幕 (调用 YouTube 内部稳定 API)...")
+    print("\n[提取] 正在挂载装甲字幕引擎 (防屏蔽机制启动)...")
+    
+    # 强制静默安装开源最强破盾武器 yt-dlp，免疫环境依赖报错
+    os.system("python -m pip install -q yt-dlp")
+    import subprocess
+
     valid_videos = []
     seen_ids = set()
     
@@ -241,81 +228,77 @@ def fetch_transcripts(video_list):
         if vid in seen_ids: continue
         seen_ids.add(vid)
         
+        full_text = ""
+        
+        # 方案 1: yt-dlp 终极穿透 (无视 IP 封锁，自动解密签名)
         try:
-            # 1. 构造内部 API 请求
-            api_url = "https://www.youtube.com/youtubei/v1/player"
-            headers = {
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            }
-            # 极其精简的 payload，伪装成普通客户端请求视频信息
-            payload = {
-                "context": {
-                    "client": {
-                        "hl": "en",
-                        "gl": "US",
-                        "clientName": "WEB",
-                        "clientVersion": "2.20210721.00.00"
-                    }
-                },
-                "videoId": vid
-            }
-            
-            resp = requests.post(api_url, headers=headers, json=payload, timeout=15)
-            data = resp.json()
-            
-            # 2. 从稳定的 JSON 结构中定位字幕轨道
-            captions = data.get("captions", {})
-            if not captions:
-                raise Exception("视频无可用字幕 (可能已被发布者禁用或尚未生成)")
+            cmd = ["yt-dlp", "--dump-json", "--skip-download", f"https://www.youtube.com/watch?v={vid}"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                info = json.loads(res.stdout)
+                subs = info.get('subtitles', {})
+                auto_subs = info.get('automatic_captions', {})
                 
-            renderer = captions.get("playerCaptionsTracklistRenderer", {})
-            tracks = renderer.get("captionTracks", [])
-            
-            if not tracks:
-                raise Exception("未找到字幕轨道列表")
+                chosen_track = None
+                for lang in ['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'ko']:
+                    if lang in subs: chosen_track = subs[lang]; break
+                    if lang in auto_subs: chosen_track = auto_subs[lang]; break
                 
-            # 3. 语言权重选择 (优先中文，其次英文，最后随便抓一个)
-            target_track = None
-            for pref_lang in ['zh-Hans', 'zh-Hant', 'zh', 'en']:
-                for track in tracks:
-                    if track.get("languageCode") == pref_lang:
-                        target_track = track
-                        break
-                if target_track: break
+                if not chosen_track:
+                    if subs: chosen_track = list(subs.values())[0]
+                    elif auto_subs: chosen_track = list(auto_subs.values())[0]
+                    
+                if chosen_track:
+                    # 抽取解析度最高的 json3 格式
+                    target_url = next((f['url'] for f in chosen_track if f.get('ext') == 'json3'), chosen_track[0]['url'])
+                    t_resp = requests.get(target_url, timeout=15)
+                    try:
+                        t_data = t_resp.json()
+                        words = [seg['utf8'] for e in t_data.get('events', []) for seg in e.get('segs', []) if 'utf8' in seg]
+                        full_text = " ".join(words)
+                    except:
+                        # 强洗 VTT/XML
+                        raw = re.sub(r'<[^>]+>', ' ', t_resp.text)
+                        full_text = html.unescape(re.sub(r'[\d:\.\->]+', ' ', raw))
+        except Exception:
+            pass
+
+        # 方案 2: 暴力正则兜底
+        if not full_text or len(full_text) < 500:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                resp = requests.get(f"https://www.youtube.com/watch?v={vid}", headers=headers, timeout=15)
+                html_text = resp.text.replace('\\u0026', '&').replace('\\/', '/')
+                urls = re.findall(r'"baseUrl":"(https://[^\"]+/api/timedtext[^\"]+)"', html_text)
+                if urls:
+                    t_resp = requests.get(urls[0], timeout=15)
+                    texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
+                    full_text = re.sub(r'<[^>]+>', '', " ".join([html.unescape(t) for t in texts]))
+            except Exception:
+                pass
                 
-            if not target_track:
-                target_track = tracks[0] # 兜底
-                
-            base_url = target_track.get("baseUrl")
-            lang_code = target_track.get("languageCode", "unknown")
-            
-            if not base_url:
-                raise Exception("字幕轨道缺少下载链接")
-                
-            # 4. 下载 XML 格式的字幕并解析
-            t_resp = requests.get(base_url, headers=headers, timeout=15)
-            texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
-            
-            # 清洗
-            full_text = " ".join([html.unescape(t).replace('\n', ' ') for t in texts])
-            full_text = re.sub(r'<[^>]+>', '', full_text)
-            
-            if len(full_text) > 1500:
-                v["transcript"] = full_text
-                valid_videos.append(v)
-                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {lang_code})")
-            else:
-                print(f"  ⚠️ 字幕过短丢弃: {v['title'][:20]}")
-                
-        except Exception as e:
-            err_msg = str(e).split('\n')[0] if str(e) else "未知错误"
-            print(f"  ❌ 跳过 [{v['title'][:20]}]: {err_msg[:60]}")
+        # 方案 3: YouTubeTranscriptApi 历史遗留接口极简调用
+        if not full_text or len(full_text) < 500:
+            try:
+                from youtube_transcript_api import YouTubeTranscriptApi
+                t_list = YouTubeTranscriptApi.get_transcript(vid)
+                full_text = " ".join([x['text'] for x in t_list])
+            except Exception:
+                pass
+
+        # 最终验证与清洗
+        full_text = " ".join(full_text.split())
+        if len(full_text) > 1000:
+            v["transcript"] = full_text
+            valid_videos.append(v)
+            print(f"  ✅ [{v['author']}] {v['title'][:25]}... ({len(full_text)} 字)")
+        else:
+            print(f"  ❌ 跳过 [{v['title'][:20]}]: 无法突破YouTube防线获取字幕 (可能无字幕或IP被盾)")
             
     return valid_videos
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 3: LLM 金字塔提炼引擎 (Claude 3.7 / Kimi)
+# Phase 3: LLM 金字塔提炼引擎
 # ════════════════════════════════════════════════════════════════════════════
 def llm_deep_analysis(videos):
     if not videos: return []
@@ -453,7 +436,7 @@ def push_to_feishu(card_payload):
 # ════════════════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (Dual-Track 原生防爆版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (Dual-Track 无敌装甲版) 启动")
     print("=" * 60)
     
     track_state = load_tracking_state()
