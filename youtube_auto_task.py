@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v1.2 (终极防爆版：零依赖原生搜索 + 零依赖原生字幕提取)
-Architecture: RSS + Native Search (Dual Track) -> Native Transcript API -> Claude 3.7 / Kimi -> Feishu
+youtube_auto_task.py  v1.3 (终极抗脆弱版：底层内部API字幕提取)
+Architecture: RSS + Native Search (Dual Track) -> Internal API Transcript -> Claude 3.7 / Kimi -> Feishu
 """
 
 import os
@@ -229,10 +229,10 @@ def scan_vip_interviews(tracking_state):
     return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 独家黑科技 2：原生零依赖字幕扒取引擎 (完全抛弃第三方库)
+# 🚀 独家黑科技 2：基于内部 API 的终极稳定字幕扒取引擎
 # ════════════════════════════════════════════════════════════════════════════
 def fetch_transcripts(video_list):
-    print("\n[提取] 开始下载全量字幕 (原生硬核解析引擎，彻底告别报错)...")
+    print("\n[提取] 开始下载全量字幕 (调用 YouTube 内部稳定 API)...")
     valid_videos = []
     seen_ids = set()
     
@@ -242,57 +242,74 @@ def fetch_transcripts(video_list):
         seen_ids.add(vid)
         
         try:
+            # 1. 构造内部 API 请求
+            api_url = "https://www.youtube.com/youtubei/v1/player"
             headers = {
+                "Content-Type": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
             }
-            url = f"https://www.youtube.com/watch?v={vid}"
-            resp = requests.get(url, headers=headers, timeout=15)
+            # 极其精简的 payload，伪装成普通客户端请求视频信息
+            payload = {
+                "context": {
+                    "client": {
+                        "hl": "en",
+                        "gl": "US",
+                        "clientName": "WEB",
+                        "clientVersion": "2.20210721.00.00"
+                    }
+                },
+                "videoId": vid
+            }
             
-            # 暴力破解：还原页面代码中的转义符
-            html_text = resp.text.replace('\\u0026', '&').replace('\\/', '/')
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=15)
+            data = resp.json()
             
-            # 使用正则从整个页面源码中直接生抠隐藏的字幕链接
-            urls = re.findall(r'"baseUrl":"(https://[^\"]+/api/timedtext[^\"]+)"', html_text)
-            if not urls:
-                raise Exception("原生引擎未发现任何字幕链接")
+            # 2. 从稳定的 JSON 结构中定位字幕轨道
+            captions = data.get("captions", {})
+            if not captions:
+                raise Exception("视频无可用字幕 (可能已被发布者禁用或尚未生成)")
                 
-            unique_urls = list(set(urls))
+            renderer = captions.get("playerCaptionsTracklistRenderer", {})
+            tracks = renderer.get("captionTracks", [])
             
-            # 语言优先权重抓取逻辑
-            target_url = None
-            for pref in ['lang=zh-Hans', 'lang=zh-Hant', 'lang=zh', 'lang=en']:
-                for u in unique_urls:
-                    if pref in u:
-                        target_url = u
+            if not tracks:
+                raise Exception("未找到字幕轨道列表")
+                
+            # 3. 语言权重选择 (优先中文，其次英文，最后随便抓一个)
+            target_track = None
+            for pref_lang in ['zh-Hans', 'zh-Hant', 'zh', 'en']:
+                for track in tracks:
+                    if track.get("languageCode") == pref_lang:
+                        target_track = track
                         break
-                if target_url: break
+                if target_track: break
                 
-            if not target_url:
-                target_url = unique_urls[0] # 兜底随便抓取一个语言
+            if not target_track:
+                target_track = tracks[0] # 兜底
                 
-            # 请求提取出来的字幕 XML 文件
-            t_resp = requests.get(target_url, headers=headers, timeout=15)
+            base_url = target_track.get("baseUrl")
+            lang_code = target_track.get("languageCode", "unknown")
             
-            # 从 XML 中提取所有的 <text> 对话内容
+            if not base_url:
+                raise Exception("字幕轨道缺少下载链接")
+                
+            # 4. 下载 XML 格式的字幕并解析
+            t_resp = requests.get(base_url, headers=headers, timeout=15)
             texts = re.findall(r'<text[^>]*>(.*?)</text>', t_resp.text, flags=re.DOTALL)
             
-            # 还原 HTML 实体符号(如 &amp;)，并去除杂乱标签
+            # 清洗
             full_text = " ".join([html.unescape(t).replace('\n', ' ') for t in texts])
             full_text = re.sub(r'<[^>]+>', '', full_text)
             
             if len(full_text) > 1500:
                 v["transcript"] = full_text
                 valid_videos.append(v)
-                
-                lang_match = re.search(r'lang=([^&]+)', target_url)
-                lang_name = lang_match.group(1) if lang_match else "unknown"
-                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {lang_name})")
+                print(f"  ✅ [{v['author']}] {v['title'][:30]}... ({len(full_text)} 字符, 语种: {lang_code})")
             else:
                 print(f"  ⚠️ 字幕过短丢弃: {v['title'][:20]}")
                 
         except Exception as e:
-            err_msg = str(e).split('\n')[0] if str(e) else "API限制或无字幕"
+            err_msg = str(e).split('\n')[0] if str(e) else "未知错误"
             print(f"  ❌ 跳过 [{v['title'][:20]}]: {err_msg[:60]}")
             
     return valid_videos
