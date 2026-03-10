@@ -18,29 +18,24 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 🚨 终极修复 1：为 yt-dlp 强行注入 JS 解密引擎，无视 YouTube 签名墙
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 🚨 极简依赖，剔除了所有容易报错的旧组件
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests feedparser yt-dlp youtube-transcript-api
+          pip install requests feedparser
 
       - name: Run YouTube Tracker Script
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          SCRAPELESS_API_KEY: ${{ secrets.SCRAPELESS_API_KEY }}
-          YT_PROXY: ${{ secrets.YT_PROXY }}
+          # 🚨 换装顶级爬虫 Firecrawl API 密钥
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
         run: |
           python youtube_auto_task.py
 
