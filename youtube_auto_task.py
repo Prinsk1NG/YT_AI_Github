@@ -281,7 +281,8 @@ def llm_deep_analysis(videos):
 【处理要求及防错机制】：
 1. 剔除广告、口水话，只保留对商业、技术、创投有真正启发的视频。
 2. 严格按以下 JSON 格式输出结果（严禁输出额外文字）。
-3. 🚨 极其重要：在填写 tldr、core_thesis 等字段时，【直接写正文】，绝对禁止自己输出“💡【TL;DR】”、“🎯 核心主张：”等标题前缀和符号，系统会在前端自动添加，你如果自己加了会导致双重乱码！
+3. 🚨 极其重要：在填写内容时，【直接写正文】，绝对禁止自己输出“💡【TL;DR】”等前缀。
+4. 🚨 致命格式警告：你输出的必须是绝对合法的 JSON！所有的字符串内部如果出现双引号，必须使用反斜杠转义（\\"）。严禁在数组或对象末尾留下多余的逗号。
 
 @@@START@@@
 {{
@@ -289,42 +290,54 @@ def llm_deep_analysis(videos):
     {{
       "category": "原数据的 tag",
       "channel": "原频道名",
-      "title": "极具深度的中文标题 (注意：直接写标题，不要带数字序号、不要带🍉等表情符)",
-      "tldr": "一句话总结视频核心结论 (直接写正文内容，绝不能带前缀)",
-      "core_thesis": "受访者提出的最核心逻辑或预测 (直接写正文内容，绝不能带前缀)",
+      "title": "极具深度的中文标题 (注意：直接写标题，不要带数字序号)",
+      "tldr": "一句话总结视频核心结论",
+      "core_thesis": "受访者提出的最核心逻辑或预测",
       "arguments": [
-        "[时间锚点] 论点一及证据 (直接写内容，绝不能带圆点•符号)",
+        "[时间锚点] 论点一及证据",
         "[时间锚点] 论点二及证据"
       ],
-      "counter_consensus": "视频中打破了哪些大众常规偏见？ (直接写正文内容，绝不能带前缀)",
-      "implications": "对当前市场的具体影响 (直接写正文内容，绝不能带前缀)"
+      "counter_consensus": "视频中打破了哪些大众常规偏见？",
+      "implications": "对当前市场的具体影响"
     }}
   ]
 }}
 @@@END@@@
 """
+    
+    analyzed_data = []
+    
+    # 🟢 第一顺位：尝试使用 Claude 3.7
     if OPENROUTER_API_KEY:
         try:
             print("  ➡️ 调用 Claude 3.7 Sonnet 中...")
             resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5, "max_tokens": 10000}, timeout=240)
             resp.raise_for_status()
-            return _extract_json(resp.json()["choices"][0]["message"]["content"])
-        except Exception as e: print(f"  ❌ Claude 失败: {e}")
+            analyzed_data = _extract_json(resp.json()["choices"][0]["message"]["content"])
+        except Exception as e: 
+            print(f"  ❌ Claude 请求异常: {e}")
 
-    if KIMI_API_KEY:
+    # 🚨 终极自愈机制：如果 Claude 失败或 JSON 解析崩溃导致数据为空，立刻触发 Kimi 兜底！
+    if not analyzed_data and KIMI_API_KEY:
         try:
-            print("  ➡️ 调用 Kimi 32k 兜底中...")
+            print("  ➡️ Claude 解析失败，触发 Kimi 32k 兜底重试中...")
             resp = requests.post("https://api.moonshot.cn/v1/chat/completions", headers={"Authorization": f"Bearer {KIMI_API_KEY}", "Content-Type": "application/json"}, json={"model": "moonshot-v1-32k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, timeout=240)
             resp.raise_for_status()
-            return _extract_json(resp.json()["choices"][0]["message"]["content"])
-        except Exception as e: print(f"  ❌ Kimi 兜底失败: {e}")
-    return []
+            analyzed_data = _extract_json(resp.json()["choices"][0]["message"]["content"])
+        except Exception as e: 
+            print(f"  ❌ Kimi 兜底失败: {e}")
+            
+    return analyzed_data
 
 def _extract_json(text):
     try:
         start = text.find("@@@START@@@") + 11
         end = text.find("@@@END@@@")
         json_str = text[start:end].strip() if start > 10 and end > -1 else text.strip('` \njson')
+        
+        # 暴力清洗大模型偶尔生成的非法控制字符
+        json_str = json_str.replace('\x00', '').replace('\x08', '').replace('\x0b', '').replace('\x0c', '').replace('\x0e', '')
+        
         return json.loads(json_str).get("videos", [])
     except Exception as e:
         print(f"解析 JSON 失败: {e}")
@@ -366,30 +379,30 @@ def build_youtube_feishu_card(analyzed_videos):
     return {"msg_type": "interactive", "card": {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管深极客"}, "subtitle": {"tag": "plain_text", "content": f"长内容认知折叠 | {date_str}"}, "template": "purple", "ud_icon": {"tag": "standard_icon", "token": "video_outlined"}}, "elements": elements}}
 
 def push_to_feishu(card_payload):
-    if not FEISHU_WEBHOOK_URL or not card_payload: return
+    if not FEISHU_WEBHOOK_URL: 
+        print("📭 未配置飞书 Webhook，跳过飞书推送。")
+        return
+    if not card_payload:
+        print("⚠️ 飞书推送被跳过：无有效卡片数据。")
+        return
     try:
         resp = requests.post(FEISHU_WEBHOOK_URL, json=card_payload, timeout=10)
         print(f"✅ 飞书推送成功: {resp.status_code}")
     except Exception as e: print(f"❌ 飞书推送异常: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 4B: 极简云 Webhook 微信公众号直通排版引擎
+# Phase 4B: 极简云/腾讯轻联 Webhook 微信公众号直通排版引擎
 # ════════════════════════════════════════════════════════════════════════════
 def push_to_jijianyun_webhook(analyzed_videos):
-    if not JIJIANYUN_WEBHOOK_URL or not analyzed_videos: 
-        print("📭 未配置极简云 Webhook，跳过微信排版与推送。")
+    # 🚨 精准区分错误原因
+    if not JIJIANYUN_WEBHOOK_URL: 
+        print("📭 未配置 Webhook 链接，跳过微信排版与推送。")
+        return
+    if not analyzed_videos:
+        print("⚠️ 微信推送被跳过：大模型未能生成有效数据。")
         return
 
-    print(f"\n[推送] 正在生成标准微信 HTML 并推送到极简云...")
-    
-    date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    article_title = f"硅谷吃瓜零时差 | 每日AI追踪 {date_str}"
-    
-    # 构建完美适配微信公众号的 HTML 字符串 (使用内联样式)
-    html_parts = []
-    
-    # 顶部固定封面大图（赛博西瓜）
-    html_parts.append(f'<section style="text-align: center; margin-bottom: 20px;"><img src="{TOP_IMAGE_URL}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" /></section>')
+    print(f"\n[推送] 正在生成标准微信 HTML 并推送到 Webhook...")
     
     # 导语框
     html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | 认知升级引擎</strong><br>以下是过去 24 小时内硅谷最具价值的硬核技术对谈深度提炼。</p></section>')
