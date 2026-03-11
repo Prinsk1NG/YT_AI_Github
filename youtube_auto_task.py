@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v23.0 (视觉精准对位版：飞书动态标题 + 微信摘要倒置 + Claude防爆加固)
+youtube_auto_task.py  v23.1 (URL链路修复版：飞书动态标题 + 微信摘要倒置 + Claude防爆加固)
 Architecture: Search -> LLM Filter -> Top 5 Synthesis -> AI Cover Gen -> ImgBB -> Distribution
 """
 
@@ -163,41 +163,43 @@ def run_single_video_analysis(video, model_type="claude"):
     except: return None
 
 # ════════════════════════════════════════════════════════════════
-# Phase 2: 全案策划 (Claude 加固防爆版)
+# Phase 2: 全案策划 (修复 URL 格式，优化标题提示词)
 # ════════════════════════════════════════════════════════════════
 def generate_global_wrapup(summaries, model_type="claude"):
     print(f"\n[全案] 正在合成爆款标题、导读与封面 Prompt...")
     base_data = [{"title": s['title'], "tldr": s['tldr']} for s in summaries if s]
-    # 🚨 强化字数限制与无Markdown输出要求，防止 Claude 报错触发兜底
+    
     prompt = f"""基于今日这 {len(base_data)} 篇情报，完成以下3个任务：
-1. 拟定一个不超过 20 字的爆款中文标题。
+1. 拟定一个 10-20 字的爆款中文标题（具有极强的新媒体/微信公众号吸睛风格，制造悬念或点明核心冲突）。
 2. 撰写一个不超过 50 字的最抓马的反共识中文导读（今日摘要）。
-3. 生成一段高质量的英文生图提示词(cover_prompt)。必须紧扣今日情报的科技核心，画风要求：Cyberpunk, neon glowing, cinematic lighting, ultra-detailed, unreal engine 5, wide angle。不要包含任何文本或字母。
+3. 生成一段高质量的英文生图提示词(cover_prompt)。紧扣今日情报核心，画风：Cyberpunk, neon glowing, cinematic lighting, unreal engine 5。不要包含任何文本或字母。
 
 【数据】：{json.dumps(base_data, ensure_ascii=False)}
-【严格输出要求】：必须且只能输出一个合法的 JSON 对象，绝对不能包含任何分析、问候语或 markdown 代码块标记（不要加 ```json）。
-{{ "article_title": "爆款标题", "article_summary": "50字内导读", "cover_prompt": "A futuristic..." }}"""
+【严格输出要求】：必须且只能输出一个合法的 JSON 对象，绝对不能包含任何分析、问候语或 markdown 代码块标记。
+{{ "article_title": "极具网感的公众号爆款标题", "article_summary": "50字内导读", "cover_prompt": "A futuristic..." }}"""
     try:
         if model_type == "claude":
-            r = requests.post("[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+            # 🚨 修复了此处多余的 markdown 括号
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
             return json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
         else:
-            client = OpenAI(api_key=KIMI_API_KEY, base_url="[https://api.moonshot.cn/v1](https://api.moonshot.cn/v1)")
+            client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
             r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}])
             return json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
     except Exception as e: 
         print(f"  ⚠️ 策划生成解析失败 ({model_type}): {e}")
-        return {"article_title": "硅谷前沿深度解码", "article_summary": "今日硬核科技与投资情报汇总", "cover_prompt": "Futuristic AI artificial intelligence brain glowing circuits, cyberpunk"}
+        return {"article_title": "巨头暗战与前沿科技：硅谷硬核解码", "article_summary": "今日硬核科技与投资情报汇总，一分钟速览硅谷最新思想碰撞。", "cover_prompt": "Futuristic AI artificial intelligence brain glowing circuits, cyberpunk"}
 
 # ════════════════════════════════════════════════════════════════
-# Phase 3: AI生图与图床转存
+# Phase 3: AI生图与图床转存 (修复 URL 格式)
 # ════════════════════════════════════════════════════════════════
 def generate_ai_cover(prompt):
     if not SF_API_KEY or not prompt: return ""
     print(f"\n[生图] 正在调用硅基流动 FLUX 生成封面...")
     try:
+        # 🚨 修复了此处多余的 markdown 括号
         resp = requests.post(
-            "[https://api.siliconflow.cn/v1/images/generations](https://api.siliconflow.cn/v1/images/generations)",
+            "https://api.siliconflow.cn/v1/images/generations",
             headers={"Authorization": f"Bearer {SF_API_KEY}", "Content-Type": "application/json"},
             json={"model": "black-forest-labs/FLUX.1-schnell", "prompt": prompt, "n": 1, "image_size": "1024x576"},
             timeout=60
@@ -216,7 +218,8 @@ def upload_to_imgbb_via_url(sf_url):
         img_resp = requests.get(sf_url, timeout=30)
         img_b64 = base64.b64encode(img_resp.content).decode("utf-8")
         
-        upload_resp = requests.post("[https://api.imgbb.com/1/upload](https://api.imgbb.com/1/upload)", data={"key": IMGBB_API_KEY, "image": img_b64}, timeout=45)
+        # 🚨 修复了此处多余的 markdown 括号
+        upload_resp = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_b64}, timeout=45)
         if upload_resp.status_code == 200:
             final_url = upload_resp.json()["data"]["url"]
             print(f"  ✅ 图床转存成功！固定直链: {final_url}")
@@ -235,12 +238,10 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
         webhooks = get_feishu_webhooks()
         if not webhooks: return
 
-        # 🚨 飞书：标题动态植入，副标题改名，导语栏替换
         elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 早 8 点｜拆解超长视频｜硅谷人在想啥**"}},
                     {"tag": "note", "elements": [{"tag": "lark_md", "content": f"💡 **今日摘要**：{sanitize_text(wrapup['article_summary'])}"}], "background_color": "blue"},
                     {"tag": "hr"}]
         for i, v in enumerate(summaries, 1):
-            # 🚨 修复正则弃用警告：将 (?i) 移至最开头
             clean_tldr = re.sub(r'(?i)^(TL;?DR\s*[:：]\s*)', '', sanitize_text(v.get('tldr', ''))).strip()
             args_text = "\n".join([f"• {sanitize_text(a)}" for a in v.get('arguments', []) if a])
             
@@ -248,13 +249,14 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{sanitize_text(v.get('core_thesis', ''))}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{sanitize_text(v.get('counter_consensus', ''))}"}})
             elements.append({"tag": "hr"})
         
+        # 🚨 飞书：主标题固定，副标题展示自动生成的公众号标题
         payload = {
             "msg_type": "interactive", 
             "card": {
                 "config": {"wide_screen_mode": True}, 
                 "header": {
-                    "title": {"tag": "plain_text", "content": f"🌍 {sanitize_text(wrapup['article_title'])}"}, 
-                    "subtitle": {"tag": "plain_text", "content": f"硅谷深度访谈解码 | {date_str}"}, 
+                    "title": {"tag": "plain_text", "content": "🌍 过去 24h 硅谷人物深度访谈拆解"}, 
+                    "subtitle": {"tag": "plain_text", "content": f"{sanitize_text(wrapup['article_title'])} | {date_str}"}, 
                     "template": "purple"
                 }, 
                 "elements": elements
@@ -269,7 +271,6 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
     else: # WeChat
         if not JIJYUN_WEBHOOK_URL: return
         
-        # 🚨 微信：摘要置顶，原导语下放变小灰字
         intro_html = (
             f'<section style="margin:20px 0; padding:15px; background:#f8f9fa; border-left:5px solid #2b579a;">'
             f'<p style="font-size:15px; font-weight:bold; color:#333; margin:0 0 8px 0;">💡 今日摘要：<span style="font-weight:normal;">{sanitize_text(wrapup["article_summary"])}</span></p>'
@@ -281,7 +282,6 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
                   intro_html]
                   
         for i, v in enumerate(summaries, 1):
-            # 🚨 修复正则弃用警告：将 (?i) 移至最开头
             clean_tldr = re.sub(r'(?i)^(TL;?DR\s*[:：]\s*)', '', sanitize_text(v.get('tldr', ''))).strip()
             args_html = "<ul style='margin: 10px 0; padding-left: 22px; font-size: 14px; color: #555; line-height: 1.6; list-style-type: disc;'>"
             for a in [sanitize_text(a) for a in v.get('arguments', []) if a]: args_html += f"<li style='margin-bottom: 8px; padding-left: 4px;'>{a}</li>"
@@ -304,7 +304,7 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
         print("  ✅ 已向微信极简云推送完毕")
 
 def main():
-    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V23.0 (视觉对位版) 启动\n" + "=" * 60)
+    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V23.1 (网络链接修复版) 启动\n" + "=" * 60)
     candidates_pool = scan_best_videos_strictly()
     if not candidates_pool:
         print("📭 过去 24 小时没有任何新鲜情报。")
@@ -342,7 +342,7 @@ def main():
         
         build_and_push(k_summaries, kimi_wrap, final_cover_url, "wechat")
 
-    print("\n🎉 V23.0 全量处理完毕！")
+    print("\n🎉 V23.1 全量处理完毕！")
 
 if __name__ == "__main__":
     main()
