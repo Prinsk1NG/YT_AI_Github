@@ -293,11 +293,11 @@ def push_claude_to_feishu(markdown_text):
     except Exception as e: print(f"❌ 飞书推送异常: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 轨道二：Kimi 128k 严苛 JSON 提取 (专供微信公众号组装)
+# 🚀 轨道二：Kimi 2.5 严苛 JSON 提取 (专供微信公众号组装)
 # ════════════════════════════════════════════════════════════════════════════
 def run_kimi_json_analysis(videos):
     if not videos or not KIMI_API_KEY: return []
-    print(f"\n[大脑 B] 呼叫 Kimi 2.5 (128k) 生成严苛 JSON (微信专用)...")
+    print(f"\n[大脑 B] 呼叫 Kimi 2.5 (kimi-k2-5) 生成严苛 JSON (微信专用)...")
     
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
     
@@ -330,10 +330,11 @@ def run_kimi_json_analysis(videos):
 @@@END@@@
 """
     try:
+        # 🚨 核心修正：使用官方正确的模型代号 kimi-k2-5
         resp = requests.post(
             "https://api.moonshot.cn/v1/chat/completions",
             headers={"Authorization": f"Bearer {KIMI_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "kimi-k2.5", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, 
+            json={"model": "kimi-k2-5", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, 
             timeout=240
         )
         resp.raise_for_status()
@@ -360,7 +361,7 @@ def push_kimi_json_to_wechat(analyzed_videos):
     
     html_parts = []
     html_parts.append(f'<section style="text-align: center; margin-bottom: 20px;"><img src="{TOP_IMAGE_URL}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" /></section>')
-    html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | Kimi结构化版</strong><br>本篇内容由 Kimi 128k 大模型进行底层重构与逻辑拆解。</p></section>')
+    html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | Kimi结构化版</strong><br>本篇内容由 Kimi 2.5 大模型进行底层重构与逻辑拆解。</p></section>')
 
     for i, v in enumerate(analyzed_videos, 1):
         title = str(v.get('title', '重磅访谈')).replace('🍉', '').replace('#', '').strip()
