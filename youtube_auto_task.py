@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v17.0 (排版精修版：清洗不可见乱码 + 论点分列排版 + 全新导读话术)
+youtube_auto_task.py  v18.0 (细节终极抛光：根除NBSP乱码 + UL/LI原生列表排版 + 标题话术更新)
 Architecture: RSS/Search -> Strict 24H Filter -> Distributed Analysis -> Global Synthesis
 """
 
@@ -47,6 +47,13 @@ def parse_views(s):
     if 'm' in s: return int(float(re.search(r'[\d\.]+', s).group()) * 1000000)
     num = re.search(r'\d+', s)
     return int(num.group()) if num else 0
+
+# 🚨 终极文本清洗器：专门猎杀隐藏的不可见字符和乱码空格
+def sanitize_text(text):
+    if not text: return ""
+    # 清理：不间断空格(\xa0)、零宽字符(\u200b)、全角空格(\u3000)、回车符等
+    clean = str(text).replace('\xa0', ' ').replace('\u200b', '').replace('\u3000', ' ').replace('\r', '')
+    return clean.strip()
 
 # ════════════════════════════════════════════════════════════════
 # Phase 1: 严格时空锁定（只抓过去 24 小时）
@@ -133,7 +140,7 @@ def run_single_video_analysis(video, model_type="claude"):
         
         prompt = f"""你是一名顶级科技分析师。请对该视频进行深度逻辑拆解。
 【字幕内容】：{transcript}
-【要求】：只输出一个合法的 JSON。
+【要求】：只输出一个合法的 JSON。所有文本必须是最干净的字符串，绝不能以特殊空格符或换行符开头。
 {{
   "title": "深度中文标题",
   "original_english_title": "{video['title']}",
@@ -170,7 +177,7 @@ def generate_global_wrapup(summaries, model_type="claude"):
     except: return {"article_title": "硅谷 AI 深度情报", "article_summary": "今日硬核 AI 情报汇总"}
 
 # ════════════════════════════════════════════════════════════════
-# Phase 3: 多端视觉分发 (V17.0 排版精修版)
+# Phase 3: 多端视觉分发 (V18.0 原生列表净化版)
 # ════════════════════════════════════════════════════════════════
 def build_and_push(summaries, wrapup, channel="feishu"):
     if not summaries: return
@@ -178,47 +185,56 @@ def build_and_push(summaries, wrapup, channel="feishu"):
     
     if channel == "feishu":
         elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每早 8 点｜拆解超长视频访谈｜硅谷大佬在想什么**"}},
-                    {"tag": "note", "elements": [{"tag": "lark_md", "content": f"💡 **导读**：{wrapup['article_summary']}"}], "background_color": "blue"},
+                    {"tag": "note", "elements": [{"tag": "lark_md", "content": f"💡 **今日摘要**：{sanitize_text(wrapup['article_summary'])}"}], "background_color": "blue"},
                     {"tag": "hr"}]
         for i, v in enumerate(summaries, 1):
-            # 🚨 强力清洗 TL;DR 中的不可见字符和多余空格
-            clean_tldr = str(v.get('tldr', '')).replace('\xa0', ' ').replace('\u200b', '').strip()
-            # 🚨 将论点提取为项目符号列表
-            args_text = "\n".join([f"• {str(arg).strip()}" for arg in v.get('arguments', [])])
+            clean_tldr = sanitize_text(v.get('tldr', ''))
+            core_thesis = sanitize_text(v.get('core_thesis', ''))
+            counter_consensus = sanitize_text(v.get('counter_consensus', ''))
             
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {v['title']}**\n💡 {v['original_english_title']}\n**TL;DR:** {clean_tldr}"}})
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{v.get('core_thesis', '')}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{v.get('counter_consensus', '')}"}})
+            # 飞书文本列表拼接
+            args_list = [sanitize_text(a) for a in v.get('arguments', []) if a]
+            args_text = "\n".join([f"• {a}" for a in args_list])
+            
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {sanitize_text(v['title'])}**\n💡 {sanitize_text(v['original_english_title'])}\n**TL;DR:** {clean_tldr}"}})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{core_thesis}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{counter_consensus}"}})
             elements.append({"tag": "hr"})
         
-        payload = {"msg_type": "interactive", "card": {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管长博客拆解"}, "subtitle": {"tag": "plain_text", "content": f"{wrapup['article_title']} | {date_str}"}, "template": "purple"}, "elements": elements}}
+        payload = {"msg_type": "interactive", "card": {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管长博客拆解"}, "subtitle": {"tag": "plain_text", "content": f"{sanitize_text(wrapup['article_title'])} | {date_str}"}, "template": "purple"}, "elements": elements}}
         requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=10)
         
     else: # WeChat
         html_p = [f'<section style="text-align:center;"><img src="{TOP_IMAGE_URL}" style="max-width:100%; border-radius:8px;"/></section>',
-                  f'<section style="margin:20px 0; padding:15px; background:#f8f9fa; border-left:5px solid #2b579a;"><p style="font-size:15px;"><strong>⚠️ 每早 8 点｜拆解超长视频访谈｜硅谷大佬在想什么</strong><br><br><strong>💡 今日摘要：</strong>{wrapup["article_summary"]}</p></section>']
+                  f'<section style="margin:20px 0; padding:15px; background:#f8f9fa; border-left:5px solid #2b579a;"><p style="font-size:15px;"><strong>⚠️ 每早 8 点｜拆解超长视频访谈｜硅谷大佬在想什么</strong><br><br><strong>💡 今日摘要：</strong>{sanitize_text(wrapup["article_summary"])}</p></section>']
         for i, v in enumerate(summaries, 1):
-            # 🚨 强力清洗 TL;DR 中的不可见字符
-            clean_tldr = str(v.get('tldr', '')).replace('\xa0', ' ').replace('\u200b', '').strip()
-            # 🚨 微信端独立渲染为带有间距的 List
-            args_html = "".join([f'<div style="margin-top: 6px; padding-left: 6px;">• {str(a).strip()}</div>' for a in v.get('arguments', [])])
+            clean_tldr = sanitize_text(v.get('tldr', ''))
+            core_thesis = sanitize_text(v.get('core_thesis', ''))
+            counter_consensus = sanitize_text(v.get('counter_consensus', ''))
+            
+            # 🚨 微信原生无序列表 (UL/LI)，长内容自动悬挂缩进，对齐极其完美
+            args_list = [sanitize_text(a) for a in v.get('arguments', []) if a]
+            args_html = "<ul style='margin: 10px 0; padding-left: 22px; font-size: 14px; color: #555; line-height: 1.6; list-style-type: disc;'>"
+            for a in args_list:
+                args_html += f"<li style='margin-bottom: 8px; padding-left: 4px;'>{a}</li>"
+            args_html += "</ul>"
             
             v_h = f"""<section style="margin-bottom:35px;">
-                      <h2 style="font-size:18px; color:#2b579a; border-bottom:1px solid #eef2f8; padding-bottom:8px;">🍉 {i}. {v['title']}</h2>
-                      <p style="font-size:13px; color:#999; margin:6px 0;">Source: {v['original_english_title']}</p>
+                      <h2 style="font-size:18px; color:#2b579a; border-bottom:1px solid #eef2f8; padding-bottom:8px;">🍉 {i}. {sanitize_text(v['title'])}</h2>
+                      <p style="font-size:13px; color:#999; margin:6px 0;">Source: {sanitize_text(v['original_english_title'])}</p>
                       <div style="margin:12px 0; font-size:15px; background:#eef2f8; padding:12px; border-radius:6px; color:#333;"><strong>TL;DR:</strong> {clean_tldr}</div>
                       <div style="font-size:15px; line-height:1.7; color:#444;">
-                          <p style="margin: 10px 0;"><strong>🎯 核心主张：</strong>{v.get('core_thesis', '')}</p>
+                          <p style="margin: 10px 0;"><strong>🎯 核心主张：</strong>{core_thesis}</p>
                           <div style="margin: 10px 0;"><strong>🧱 论点与证据链：</strong>{args_html}</div>
-                          <p style="margin: 10px 0;"><strong>🧠 反共识：</strong>{v.get('counter_consensus', '')}</p>
+                          <p style="margin: 10px 0;"><strong>🧠 反共识：</strong>{counter_consensus}</p>
                       </div>
                       </section>"""
             html_p.append(v_h)
         
-        payload = {"author": "大尉 Prinski", "cover_jpg": TOP_IMAGE_URL, "html_content": "".join(html_p).replace('\n',''), "title": wrapup['article_title']}
+        payload = {"author": "大尉 Prinski", "cover_jpg": TOP_IMAGE_URL, "html_content": "".join(html_p).replace('\n',''), "title": sanitize_text(wrapup['article_title'])}
         requests.post(JIJIANYUN_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
 
 def main():
-    print("=" * 60 + "\n🚀 24H 严格时空锁定情报系统 V17.0 启动\n" + "=" * 60)
+    print("=" * 60 + "\n🚀 24H 严格时空锁定情报系统 V18.0 启动\n" + "=" * 60)
     fresh_videos = scan_best_videos_strictly()
     if not fresh_videos:
         print("📭 过去 24 小时没有任何新鲜情报。")
@@ -240,7 +256,7 @@ def main():
     if q_summaries:
         build_and_push(q_summaries, generate_global_wrapup(q_summaries, "qwen"), "wechat")
 
-    print("\n🎉 V17.0 24H 鲜瓜分发完毕！")
+    print("\n🎉 V18.0 24H 鲜瓜分发完毕！")
 
 if __name__ == "__main__":
     main()
