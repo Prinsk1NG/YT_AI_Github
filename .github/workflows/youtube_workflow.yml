@@ -1,8 +1,6 @@
 name: YouTube 播客深研情报引擎
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
