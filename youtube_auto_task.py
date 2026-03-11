@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v19.0 (泛科技AI智能过滤 + 终极乱码粉碎机 + 原生列表排版)
-Architecture: RSS/Search -> Top 15 Candidates -> LLM Semantic Filter -> Top 5 Synthesis
+youtube_auto_task.py  v22.0 (统一密钥规范版：多飞书群分发 + Kimi引擎回归)
+Architecture: Search -> LLM Filter -> Top 5 Synthesis -> AI Cover Gen -> ImgBB -> Distribution
 """
 
 import os
@@ -9,6 +9,7 @@ import re
 import json
 import time
 import datetime
+import base64
 from datetime import timezone, timedelta
 from pathlib import Path
 import html
@@ -16,18 +17,35 @@ import requests
 import feedparser
 from openai import OpenAI
 
-# ── 环境变量 ─────────────────────────────────────────────────────
-FEISHU_WEBHOOK_URL    = os.getenv("FEISHU_WEBHOOK_URL", "")
+# ── 环境变量 (严格对齐 Secrets 规范) ──────────────────────────────
 OPENROUTER_API_KEY    = os.getenv("OPENROUTER_API_KEY", "")
-QWEN_API_KEY          = os.getenv("QWEN_API_KEY", "")
+KIMI_API_KEY          = os.getenv("KIMI_API_KEY", "")
 TWTAPI_KEY            = os.getenv("TWTAPI_KEY", "") 
-JIJIANYUN_WEBHOOK_URL = os.getenv("JIJIANYUN_WEBHOOK_URL", "") 
-TOP_IMAGE_URL         = "http://mmbiz.qpic.cn/sz_mmbiz_png/SfPwFYYicIliagEk8zLcesc7sBVZqibHnxN8khWb60NicWDGKiaKQum7ysAXHwXW1RF4zKLKnMrsKYBDO5U3mPIhye2r4Zzdwica9XqaMWiaW8zU7s/0?wx_fmt=png"
+JIJYUN_WEBHOOK_URL    = os.getenv("JIJYUN_WEBHOOK_URL", "") 
+SF_API_KEY            = os.getenv("SF_API_KEY", "")       
+IMGBB_API_KEY         = os.getenv("IMGBB_API_KEY", "")    
+
+OPENROUTER_MODEL      = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.7-sonnet")
+try:
+    KIMI_TEMPERATURE  = float(os.getenv("KIMI_TEMPERATURE", "0.3"))
+except:
+    KIMI_TEMPERATURE  = 0.3
+
+DEFAULT_COVER_URL     = "http://mmbiz.qpic.cn/sz_mmbiz_png/SfPwFYYicIliagEk8zLcesc7sBVZqibHnxN8khWb60NicWDGKiaKQum7ysAXHwXW1RF4zKLKnMrsKYBDO5U3mPIhye2r4Zzdwica9XqaMWiaW8zU7s/0?wx_fmt=png"
+
+# ── 飞书多 Webhook 支持 ──────────────────────────────────────────
+def get_feishu_webhooks() -> list:
+    urls = []
+    for suffix in ["", "_1", "_2", "_3"]:
+        url = os.getenv(f"FEISHU_WEBHOOK_URL{suffix}", "")
+        if url:
+            urls.append(url)
+    return urls
 
 # ── 策略常量 ─────────────────────────────────────────────────────
 DEEP_DIVE_THRESHOLD_SEC = 40 * 60 
-CANDIDATE_POOL_SIZE = 15   # 🚨 扩大候补池，防垃圾视频占位
-MAX_VALID_VIDEOS = 5       # 最终只取 5 个纯正科技视频
+CANDIDATE_POOL_SIZE = 20   
+MAX_VALID_VIDEOS = 5       
 
 VIP_LIST = ["Elon Musk", "Sam Altman", "Jensen Huang", "Ilya Sutskever", "Dario Amodei", "Satya Nadella", "DeepSeek"]
 CORE_CHANNELS = {
@@ -49,15 +67,14 @@ def parse_views(s):
     num = re.search(r'\d+', s)
     return int(num.group()) if num else 0
 
-# 🚨 终极文本清洗器：使用正则碾碎所有不可见的空白符（解决 TL;DR 乱码）
 def sanitize_text(text):
     if not text: return ""
-    # 强力猎杀：\xa0, \u200b, \u3000, \r, \n, \t 全部压平成一个标准空格
-    clean = re.sub(r'[\s\u200b\u3000\xa0]+', ' ', str(text))
+    clean = re.sub(r'[\xa0\u200b\u3000\r\t]+', ' ', str(text))
+    clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
 # ════════════════════════════════════════════════════════════════
-# Phase 1: 扩大撒网 (只抓过去 24 小时)
+# Phase 1: 扫描与过滤
 # ════════════════════════════════════════════════════════════════
 def scan_best_videos_strictly():
     print(f"\n[扫描] 启动 24H 引擎，构建 {CANDIDATE_POOL_SIZE} 大候补池...")
@@ -71,13 +88,7 @@ def scan_best_videos_strictly():
             for entry in feed.entries:
                 pub_time = datetime.datetime.strptime(entry.published, "%Y-%m-%dT%H:%M:%S%z")
                 if pub_time > deadline:
-                    candidates.append({
-                        "video_id": entry.yt_videoid, 
-                        "title": entry.title, 
-                        "author": info["name"], 
-                        "views": 999999, 
-                        "duration_sec": 3600
-                    })
+                    candidates.append({"video_id": entry.yt_videoid, "title": entry.title, "author": info["name"], "views": 999999, "duration_sec": 3600})
         except: pass
 
     for vip in VIP_LIST:
@@ -90,8 +101,7 @@ def scan_best_videos_strictly():
             if not data_match: continue
             data = json.loads(data_match.group(1))
             
-            try:
-                items = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents'][0]['itemSectionRenderer']['contents']
+            try: items = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents'][0]['itemSectionRenderer']['contents']
             except: continue
 
             for item in items:
@@ -100,194 +110,212 @@ def scan_best_videos_strictly():
                     title = vr['title']['runs'][0]['text']
                     time_text = vr.get('publishedTimeText', {}).get('simpleText', '').lower()
                     
-                    if any(x in time_text for x in ['day', 'week', 'month', 'year', '天', '周', '月', '年']):
-                        continue
-                    if not any(x in time_text for x in ['hour', 'minute', 'second', 'ago', '前', '刚刚']):
-                        continue
+                    if any(x in time_text for x in ['day', 'week', 'month', 'year', '天', '周', '月', '年']): continue
+                    if not any(x in time_text for x in ['hour', 'minute', 'second', 'ago', '前', '刚刚']): continue
 
                     d_sec = parse_duration(vr.get('lengthText', {}).get('simpleText', '0:00'))
-                    v_count = parse_views(vr.get('viewCountText', {}).get('simpleText', '0'))
-                    
                     if d_sec > 600:
-                        candidates.append({
-                            "video_id": vr['videoId'], 
-                            "title": title, 
-                            "author": vr['ownerText']['runs'][0]['text'], 
-                            "views": v_count, 
-                            "duration_sec": d_sec
-                        })
+                        candidates.append({"video_id": vr['videoId'], "title": title, "author": vr['ownerText']['runs'][0]['text'], "views": parse_views(vr.get('viewCountText', {}).get('simpleText', '0')), "duration_sec": d_sec})
         except: pass
 
-    unique = {}
-    for v in candidates:
-        if v['video_id'] not in unique:
-            unique[v['video_id']] = v
-    
-    # 按照先长视频、再高播放量排序，取前 15 名进入安检池
+    unique = {v['video_id']: v for v in candidates}
     pool = sorted(unique.values(), key=lambda x: (x['duration_sec'] >= DEEP_DIVE_THRESHOLD_SEC, x['views']), reverse=True)[:CANDIDATE_POOL_SIZE]
-    print(f"🎯 寻获 {len(pool)} 个新鲜视频，即将交由 AI 进行领域安检。")
+    print(f"🎯 寻获 {len(pool)} 个新鲜视频。")
     return pool
 
-# ════════════════════════════════════════════════════════════════
-# Phase 2: 分布式处理与 AI 语义安检护盾
-# ════════════════════════════════════════════════════════════════
 def run_single_video_analysis(video, model_type="claude"):
-    print(f"  🎬 正在查验与解剖: {video['title'][:30]}...")
+    print(f"  🎬 正在解剖: {video['title'][:30]}...")
     yt_url = f"https://www.youtube.com/watch?v={video['video_id']}"
     try:
         resp = requests.get(f"https://r.jina.ai/{yt_url}", headers={"X-Return-Format": "text"}, timeout=40)
-        if resp.status_code != 200 or len(resp.text) < 500:
-            return None
+        if resp.status_code != 200 or len(resp.text) < 500: return None
         transcript = " ".join(resp.text.split("Title:", 1)[-1].split()[:20000])
         
-        # 🚨 AI 语义安检：强迫大模型判断该内容是否属于我们的圈子
-        prompt = f"""你是一名顶级科技与创投分析师。
-【核心任务一：领域过滤】
-我们只关注“硅谷、科技公司、AI人工智能、VC创投、商业逻辑、一级/二级市场投资”等泛科技与商业领域。
-如果该视频内容与上述领域【完全无关】（例如：纯粹的美食探店、美妆、日常Vlog、不相关的社会火灾新闻、纯体育等），请直接且仅输出：
-{{"irrelevant": true}}
-
-【核心任务二：深度拆解】
-如果内容相关，请仔细阅读字幕并输出以下JSON结构，绝不能包含Markdown标记：
+        prompt = f"""你是一名极为严苛的硅谷创投分析师。
+【过滤】：如果内容是纯社会新闻/娱乐/美食等无关内容，判定 is_relevant: false
+【输出 JSON】：
 {{
-  "irrelevant": false,
+  "relevance_analysis": "一句话分析",
+  "is_relevant": true/false,
   "title": "深度中文标题",
   "original_english_title": "{video['title']}",
-  "tldr": "一句话中文总结(TL;DR)",
+  "tldr": "一句话中文总结",
   "core_thesis": "最核心逻辑",
   "arguments": ["论点1", "论点2", "论点3"], 
   "counter_consensus": "反常规认知",
   "implications": "行业推演"
 }}
-【字幕内容】：{transcript}
-"""
-        result_json = None
+【字幕】：{transcript}"""
+        
         if model_type == "claude":
-            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}, timeout=120)
-            result_json = json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}, timeout=120)
+            res = json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
         else:
-            client = OpenAI(api_key=QWEN_API_KEY, base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-            r = client.chat.completions.create(model="qwen-max", messages=[{"role": "user", "content": prompt}], temperature=0.3)
-            result_json = json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
+            client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
+            r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}], temperature=KIMI_TEMPERATURE)
+            res = json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
         
-        # 🚨 检查模型判决：如果是无关垃圾视频，直接丢弃
-        if result_json and result_json.get("irrelevant") is True:
-            print("    ⏭️ [护盾拦截] 判定为非科技/投资领域无关内容，直接丢弃。")
+        if res and res.get("is_relevant") is False:
+            print(f"    ⏭️ [拦截] {res.get('relevance_analysis', '无关内容')} -> 丢弃。")
             return None
-            
-        print("    ✅ [安检通过] 内容优质，解析成功。")
-        return result_json
-        
-    except Exception as e: 
-        return None
+        print("    ✅ [通过] 优质情报。")
+        return res
+    except: return None
 
+# ════════════════════════════════════════════════════════════════
+# Phase 2: 全案策划
+# ════════════════════════════════════════════════════════════════
 def generate_global_wrapup(summaries, model_type="claude"):
-    print(f"\n[全案] 成功集齐 {len(summaries)} 篇纯正科技情报，正在合成爆款标题...")
+    print(f"\n[全案] 正在合成爆款标题、导读与封面 Prompt...")
     base_data = [{"title": s['title'], "tldr": s['tldr']} for s in summaries if s]
-    prompt = f"""基于今日这 {len(base_data)} 篇硅谷科技情报，起一个5-10字标题，并写一个30字内最抓马的反共识导读。
+    prompt = f"""基于今日这 {len(base_data)} 篇情报，完成以下3个任务：
+1. 拟定一个 5-10 字的爆款标题。
+2. 撰写一个 30 字以内最抓马的反共识导读。
+3. 生成一段高质量的英文生图提示词(cover_prompt)。必须紧扣今日情报的科技核心，画风要求：Cyberpunk, neon glowing, cinematic lighting, ultra-detailed, unreal engine 5, wide angle。不要包含任何文本或字母。
+
 【数据】：{json.dumps(base_data, ensure_ascii=False)}
-【输出】：JSON
-{{ "article_title": "爆款标题", "article_summary": "30字导读" }}"""
+【输出 JSON】：
+{{ "article_title": "爆款标题", "article_summary": "30字导读", "cover_prompt": "A futuristic..." }}"""
     try:
         if model_type == "claude":
-            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
             return json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
         else:
-            client = OpenAI(api_key=QWEN_API_KEY, base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-            r = client.chat.completions.create(model="qwen-max", messages=[{"role": "user", "content": prompt}])
+            client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
+            r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}])
             return json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
-    except: return {"article_title": "硅谷前沿深度解码", "article_summary": "今日硬核科技与投资情报汇总"}
+    except: return {"article_title": "硅谷深度解码", "article_summary": "今日硬核情报汇总", "cover_prompt": "Futuristic AI artificial intelligence brain glowing circuits, cyberpunk"}
 
 # ════════════════════════════════════════════════════════════════
-# Phase 3: 多端视觉分发 (彻底无乱码版)
+# Phase 3: AI生图与图床转存
 # ════════════════════════════════════════════════════════════════
-def build_and_push(summaries, wrapup, channel="feishu"):
+def generate_ai_cover(prompt):
+    if not SF_API_KEY or not prompt: return ""
+    print(f"\n[生图] 正在调用硅基流动 FLUX 生成封面...")
+    try:
+        resp = requests.post(
+            "https://api.siliconflow.cn/v1/images/generations",
+            headers={"Authorization": f"Bearer {SF_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "black-forest-labs/FLUX.1-schnell", "prompt": prompt, "n": 1, "image_size": "1024x576"},
+            timeout=60
+        )
+        if resp.status_code == 200:
+            url = resp.json().get("images", [{}])[0].get("url") or resp.json().get("data", [{}])[0].get("url")
+            print(f"  ✅ 生图成功！URL: {url[:60]}...")
+            return url
+    except Exception as e: print(f"  ❌ 生图失败: {e}")
+    return ""
+
+def upload_to_imgbb_via_url(sf_url):
+    if not IMGBB_API_KEY or not sf_url: return sf_url 
+    print(f"  [图床] 正在转存至 ImgBB 以保障微信环境渲染...")
+    try:
+        img_resp = requests.get(sf_url, timeout=30)
+        img_b64 = base64.b64encode(img_resp.content).decode("utf-8")
+        
+        upload_resp = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_b64}, timeout=45)
+        if upload_resp.status_code == 200:
+            final_url = upload_resp.json()["data"]["url"]
+            print(f"  ✅ 图床转存成功！固定直链: {final_url}")
+            return final_url
+    except Exception as e: print(f"  ⚠️ 转存失败，继续使用原链: {e}")
+    return sf_url
+
+# ════════════════════════════════════════════════════════════════
+# Phase 4: 多端视觉分发
+# ════════════════════════════════════════════════════════════════
+def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
     if not summaries: return
     date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     
     if channel == "feishu":
+        webhooks = get_feishu_webhooks()
+        if not webhooks: return
+
         elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每早 8 点｜拆解超长视频访谈｜硅谷大佬在想什么**"}},
                     {"tag": "note", "elements": [{"tag": "lark_md", "content": f"💡 **今日摘要**：{sanitize_text(wrapup['article_summary'])}"}], "background_color": "blue"},
                     {"tag": "hr"}]
         for i, v in enumerate(summaries, 1):
-            clean_tldr = sanitize_text(v.get('tldr', ''))
-            core_thesis = sanitize_text(v.get('core_thesis', ''))
-            counter_consensus = sanitize_text(v.get('counter_consensus', ''))
+            clean_tldr = re.sub(r'^(?i)(TL;?DR\s*[:：]\s*)', '', sanitize_text(v.get('tldr', ''))).strip()
+            args_text = "\n".join([f"• {sanitize_text(a)}" for a in v.get('arguments', []) if a])
             
-            args_list = [sanitize_text(a) for a in v.get('arguments', []) if a]
-            args_text = "\n".join([f"• {a}" for a in args_list])
-            
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {sanitize_text(v['title'])}**\n💡 {sanitize_text(v['original_english_title'])}\n**TL;DR:** {clean_tldr}"}})
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{core_thesis}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{counter_consensus}"}})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {sanitize_text(v['title'])}**\n💡 {sanitize_text(v['original_english_title'])}\n**核心速读：**{clean_tldr}"}})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{sanitize_text(v.get('core_thesis', ''))}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{sanitize_text(v.get('counter_consensus', ''))}"}})
             elements.append({"tag": "hr"})
         
         payload = {"msg_type": "interactive", "card": {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "🌍 硅谷油管长博客拆解"}, "subtitle": {"tag": "plain_text", "content": f"{sanitize_text(wrapup['article_title'])} | {date_str}"}, "template": "purple"}, "elements": elements}}
-        requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=10)
+        
+        for url in webhooks:
+            try: requests.post(url, json=payload, timeout=10)
+            except: pass
+        print(f"  ✅ 已向 {len(webhooks)} 个飞书群推送完毕")
         
     else: # WeChat
-        html_p = [f'<section style="text-align:center;"><img src="{TOP_IMAGE_URL}" style="max-width:100%; border-radius:8px;"/></section>',
+        if not JIJYUN_WEBHOOK_URL: return
+        html_p = [f'<section style="text-align:center;"><img src="{final_cover_url}" style="max-width:100%; border-radius:8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display:block; margin: 0 auto;"/></section>',
                   f'<section style="margin:20px 0; padding:15px; background:#f8f9fa; border-left:5px solid #2b579a;"><p style="font-size:15px;"><strong>⚠️ 每早 8 点｜拆解超长视频访谈｜硅谷大佬在想什么</strong><br><br><strong>💡 今日摘要：</strong>{sanitize_text(wrapup["article_summary"])}</p></section>']
         for i, v in enumerate(summaries, 1):
-            clean_tldr = sanitize_text(v.get('tldr', ''))
-            core_thesis = sanitize_text(v.get('core_thesis', ''))
-            counter_consensus = sanitize_text(v.get('counter_consensus', ''))
-            
-            args_list = [sanitize_text(a) for a in v.get('arguments', []) if a]
+            clean_tldr = re.sub(r'^(?i)(TL;?DR\s*[:：]\s*)', '', sanitize_text(v.get('tldr', ''))).strip()
             args_html = "<ul style='margin: 10px 0; padding-left: 22px; font-size: 14px; color: #555; line-height: 1.6; list-style-type: disc;'>"
-            for a in args_list:
-                args_html += f"<li style='margin-bottom: 8px; padding-left: 4px;'>{a}</li>"
+            for a in [sanitize_text(a) for a in v.get('arguments', []) if a]: args_html += f"<li style='margin-bottom: 8px; padding-left: 4px;'>{a}</li>"
             args_html += "</ul>"
             
             v_h = f"""<section style="margin-bottom:35px;">
                       <h2 style="font-size:18px; color:#2b579a; border-bottom:1px solid #eef2f8; padding-bottom:8px;">🍉 {i}. {sanitize_text(v['title'])}</h2>
                       <p style="font-size:13px; color:#999; margin:6px 0;">Source: {sanitize_text(v['original_english_title'])}</p>
-                      <div style="margin:12px 0; font-size:15px; background:#eef2f8; padding:12px; border-radius:6px; color:#333;"><strong>TL;DR:</strong> {clean_tldr}</div>
+                      <div style="margin:12px 0; font-size:15px; background:#eef2f8; padding:12px; border-radius:6px; color:#333;"><strong>💡 核心速读：</strong>{clean_tldr}</div>
                       <div style="font-size:15px; line-height:1.7; color:#444;">
-                          <p style="margin: 10px 0;"><strong>🎯 核心主张：</strong>{core_thesis}</p>
+                          <p style="margin: 10px 0;"><strong>🎯 核心主张：</strong>{sanitize_text(v.get('core_thesis', ''))}</p>
                           <div style="margin: 10px 0;"><strong>🧱 论点与证据链：</strong>{args_html}</div>
-                          <p style="margin: 10px 0;"><strong>🧠 反共识：</strong>{counter_consensus}</p>
+                          <p style="margin: 10px 0;"><strong>🧠 反共识：</strong>{sanitize_text(v.get('counter_consensus', ''))}</p>
                       </div>
                       </section>"""
             html_p.append(v_h)
         
-        payload = {"author": "大尉 Prinski", "cover_jpg": TOP_IMAGE_URL, "html_content": "".join(html_p).replace('\n',''), "title": sanitize_text(wrapup['article_title'])}
-        requests.post(JIJIANYUN_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+        payload = {"author": "大尉 Prinski", "cover_jpg": final_cover_url, "html_content": "".join(html_p).replace('\n',''), "title": sanitize_text(wrapup['article_title'])}
+        requests.post(JIJYUN_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+        print("  ✅ 已向微信极简云推送完毕")
 
 def main():
-    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V19.0 启动\n" + "=" * 60)
+    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V22.0 (统一密钥流) 启动\n" + "=" * 60)
     candidates_pool = scan_best_videos_strictly()
     if not candidates_pool:
         print("📭 过去 24 小时没有任何新鲜情报。")
         return
 
-    # 1. Claude 通道（发飞书）
-    print("\n---------- [启动 Claude 分析流] ----------")
+    # -------- 飞书通道 (Claude 主导) --------
     c_summaries = []
     for v in candidates_pool:
         res = run_single_video_analysis(v, "claude")
-        if res: 
-            c_summaries.append(res)
-        # 🚨 收集满 5 个有效的优质科技视频，立刻停止干活！
-        if len(c_summaries) >= MAX_VALID_VIDEOS:
-            break
-            
+        if res: c_summaries.append(res)
+        if len(c_summaries) >= MAX_VALID_VIDEOS: break
     if c_summaries:
-        build_and_push(c_summaries, generate_global_wrapup(c_summaries, "claude"), "feishu")
+        claude_wrap = generate_global_wrapup(c_summaries, "claude")
+        build_and_push(c_summaries, claude_wrap, DEFAULT_COVER_URL, "feishu")
 
-    # 2. Qwen 通道（发微信）
-    print("\n---------- [启动 Qwen 分析流] ----------")
-    q_summaries = []
+    # -------- 微信通道 (Kimi 主导 + 生图) --------
+    print("\n---------- [启动 Kimi 微信分发流与生图引擎] ----------")
+    k_summaries = []
     for v in candidates_pool:
-        res = run_single_video_analysis(v, "qwen")
-        if res: 
-            q_summaries.append(res)
-        if len(q_summaries) >= MAX_VALID_VIDEOS:
-            break
+        res = run_single_video_analysis(v, "kimi")
+        if res: k_summaries.append(res)
+        if len(k_summaries) >= MAX_VALID_VIDEOS: break
             
-    if q_summaries:
-        build_and_push(q_summaries, generate_global_wrapup(q_summaries, "qwen"), "wechat")
+    if k_summaries:
+        kimi_wrap = generate_global_wrapup(k_summaries, "kimi")
+        
+        final_cover_url = DEFAULT_COVER_URL
+        prompt = kimi_wrap.get("cover_prompt", "")
+        if prompt:
+            sf_url = generate_ai_cover(prompt)
+            if sf_url:
+                imgbb_url = upload_to_imgbb_via_url(sf_url)
+                if imgbb_url: final_cover_url = imgbb_url
+                else: final_cover_url = sf_url 
+        
+        build_and_push(k_summaries, kimi_wrap, final_cover_url, "wechat")
 
-    print("\n🎉 V19.0 (智能过滤无乱码版) 圆满分发完毕！")
+    print("\n🎉 V22.0 全量处理完毕！")
 
 if __name__ == "__main__":
     main()
