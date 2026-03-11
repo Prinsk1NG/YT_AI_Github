@@ -1,8 +1,10 @@
 name: YouTube 播客深研情报引擎
 
 on:
-  
-  # 允许在 GitHub 网页端 Actions 页面手动点击运行
+  # 每天北京时间早上 8:00 执行一次 (对应 UTC 时间 0:00)
+  schedule:
+    - cron: '0 0 * * *'
+  # 允许在 GitHub 网页端 Actions 页面手动点击运行，或者通过 API 外部触发
   workflow_dispatch:
 
 # 必须赋予写权限，以便脚本在运行后更新本地的 yt_tracking.json 状态文件
@@ -24,7 +26,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 3. 安装依赖 (极简依赖：已剔除所有容易引起环境报错的组件)
+      # 3. 安装极简依赖
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -33,20 +35,21 @@ jobs:
       # 4. 执行核心自动化脚本
       - name: Run YouTube Tracker Script
         env:
-          # 🚨 从 GitHub Secrets 动态读取密钥，请确保已在仓库 Settings 中配置
+          # 🚨 动态读取密钥
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          # 🚨 新增：极简云 Webhook 密钥
+          JIJIANYUN_WEBHOOK_URL: ${{ secrets.JIJIANYUN_WEBHOOK_URL }}
         run: |
           python youtube_auto_task.py
 
-      # 5. 自动保存"长期记忆"状态文件回代码仓库，实现频道淘汰机制
+      # 5. 自动保存状态文件
       - name: Commit and push tracking state
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add data/yt_tracking.json
-          # 如果文件有变化就提交，没变化就安全跳过
           git commit -m "chore: 自动更新 YouTube 追踪与淘汰状态 [skip ci]" || echo "No changes to commit"
           git push
