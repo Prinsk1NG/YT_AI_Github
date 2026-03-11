@@ -333,7 +333,7 @@ def run_kimi_json_analysis(videos):
         resp = requests.post(
             "https://api.moonshot.cn/v1/chat/completions",
             headers={"Authorization": f"Bearer {KIMI_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "moonshot-v1-128k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, 
+            json={"model": "kimi-k2.5", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, 
             timeout=240
         )
         resp.raise_for_status()
