@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 3. 安装依赖 (包含 V15 版本分布式引擎所需的 openai 官方 SDK)
+      # 3. 安装依赖 (包含最新的 openai 官方 SDK)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
