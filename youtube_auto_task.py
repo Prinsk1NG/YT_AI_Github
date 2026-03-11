@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v6.0 (A/B 对比测试版：Claude 发飞书，Kimi 发微信)
-Architecture: RSS/Search -> Jina / Firecrawl -> Claude(Markdown)->Feishu & Kimi(JSON)->WeChat
+youtube_auto_task.py  v7.0 (飞书精美卡片版 + Kimi 2.5 官方SDK版)
+Architecture: RSS/Search -> Jina / Firecrawl -> Claude(JSON)->Feishu Card & Kimi(JSON)->WeChat
 """
 
 import os
@@ -14,6 +14,7 @@ from pathlib import Path
 import html
 import requests
 import feedparser
+from openai import OpenAI  # 🚨 引入官方库
 
 # ── Environment variables ────────────────────────────────────────────────────
 FEISHU_WEBHOOK_URL    = os.getenv("FEISHU_WEBHOOK_URL", "")
@@ -210,107 +211,139 @@ def fetch_transcripts(video_list):
             print(f"  ❌ 提取失败: {v['title'][:20]}")
     return valid_videos
 
-# ════════════════════════════════════════════════════════════════════════════
-# 🚀 轨道一：Claude 3.7 原生 Markdown 提取 (专供飞书)
-# ════════════════════════════════════════════════════════════════════════════
-def run_claude_markdown_analysis(videos):
-    if not videos or not OPENROUTER_API_KEY: return ""
-    print("\n[大脑 A] 呼叫 Claude 3.7 生成原生排版 Markdown (飞书专用)...")
-    
-    payload = [{"channel": v["author"], "title": v["title"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>15000 else v["transcript"]} for v in videos]
-    
-    prompt = f"""你是顶级硅谷创投分析师。以下是过去24小时内YouTube高价值AI对谈/讲座的全量字幕。
-请使用「金字塔原理」对这些长内容进行降维打击级的深度拆解。
+def _extract_json(text):
+    try:
+        start = text.find("@@@START@@@") + 11
+        end = text.find("@@@END@@@")
+        json_str = text[start:end].strip() if start > 10 and end > -1 else text.strip('` \njson')
+        json_str = json_str.replace('\x00', '').replace('\x08', '')
+        return json.loads(json_str).get("videos", [])
+    except Exception as e:
+        print(f"解析 JSON 失败: {e}")
+        return []
 
-【原始数据】：
-{json.dumps(payload, ensure_ascii=False)}
+# ════════════════════════════════════════════════════════════════════════════
+# 🚀 轨道一：Claude 3.7 JSON提取 + 飞书高级卡片排版
+# ════════════════════════════════════════════════════════════════════════════
+def run_claude_json_analysis(videos):
+    if not videos or not OPENROUTER_API_KEY: return []
+    print("\n[大脑 A] 呼叫 Claude 3.7 生成结构化情报 (飞书专用)...")
+    
+    payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>15000 else v["transcript"]} for v in videos]
+    
+    prompt = f"""你是顶级硅谷创投分析师。请对以下内容进行深度拆解。
+【原始数据】：{json.dumps(payload, ensure_ascii=False)}
 
 【处理要求】：
-1. 剔除广告、口水话，只保留对商业、技术、创投有真正启发的视频。
-2. 请直接输出一篇排版极其精美、富有深度的 **原生 Markdown 格式** 报告！
-3. 绝对禁止输出 JSON 或代码块。
-4. 结构要求：
-   - 包含引言导读。
-   - 每个视频作为独立模块，拟定一个极具深度的标题（可带Emoji如🍉）。
-   - 必须包含「💡 TL;DR」、「🎯 核心主张」、「🧱 论点与证据链」、「🧠 反共识与盲区」和「💼 产业投资推演」。
-5. 直接开始输出正文，不要有任何寒暄。
+1. 剔除广告，保留硬核观点。
+2. 直接写正文内容，禁止输出“💡【TL;DR】”等前缀。
+3. 必须输出绝对合法的 JSON！如果有双引号必须转义（\\"）。
+
+@@@START@@@
+{{
+  "videos": [
+    {{
+      "category": "原数据的 tag",
+      "channel": "原频道名",
+      "title": "极具深度的中文标题 (不带序号)",
+      "tldr": "一句话总结核心结论",
+      "core_thesis": "最核心逻辑或预测",
+      "arguments": ["论点一及证据", "论点二及证据"],
+      "counter_consensus": "反常规偏见",
+      "implications": "对市场的具体影响"
+    }}
+  ]
+}}
+@@@END@@@
 """
     try:
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions", 
             headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, 
-            json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}], "temperature": 0.6}, 
+            json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5, "max_tokens": 10000}, 
             timeout=240
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return _extract_json(resp.json()["choices"][0]["message"]["content"])
     except Exception as e:
-        print(f"  ❌ Claude Markdown 生成失败: {e}")
-        return ""
+        print(f"  ❌ Claude 解析失败: {e}")
+        return []
 
-def push_claude_to_feishu(markdown_text):
-    if not FEISHU_WEBHOOK_URL or not markdown_text: 
-        print("📭 跳过飞书推送 (无URL或无内容)。")
-        return
-    
+def build_youtube_feishu_card(analyzed_videos):
+    if not analyzed_videos: return None
     date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     
-    # 构造飞书卡片，利用 larrk_md 承载 Claude 华丽的排版
-    payload = {
+    # 飞书卡片头部模块
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每日早8点准时更新 | 深度长视频拆解 | 认知升级引擎**"}, "icon": {"tag": "standard_icon", "token": "time_outlined", "color": "blue"}},
+        {"tag": "hr"}
+    ]
+    
+    # 动态组装每条新闻的排版
+    for i, v in enumerate(analyzed_videos, 1):
+        title = str(v.get('title', '重磅访谈')).replace('🍉', '').replace('#', '').strip()
+        tldr = str(v.get('tldr', '')).strip()
+        core = str(v.get('core_thesis', '')).strip()
+        counter = str(v.get('counter_consensus', '')).strip()
+        imp = str(v.get('implications', '')).strip()
+        
+        args_list = v.get('arguments', [])
+        args_text = "\n".join([f"• {str(arg).strip()}" for arg in args_list])
+
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {title}**"}})
+        elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": f"📺 **频道/来源**：{v.get('channel', '未知频道')} | 🏷️ **标签**：{v.get('category', '科技播客')}\n💡 **【TL;DR】** {tldr}"}], "background_color": "blue"})
+        
+        content_md = (
+            f"**🎯 核心主张**\n<font color='grey'>{core}</font>\n\n"
+            f"**🧱 论点与证据链**\n<font color='grey'>{args_text}</font>\n\n"
+            f"**🧠 反共识与认知盲区**\n<font color='grey'>{counter}</font>\n\n"
+            f"**💼 产业与投资推演**\n<font color='grey'>{imp}</font>"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content_md}})
+        elements.append({"tag": "hr"})
+        
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "*🤖 本次播客深研分析由 Claude 3.7 Sonnet 强力驱动*"}})
+    
+    return {
         "msg_type": "interactive",
         "card": {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "🌍 硅谷油管深极客 (Claude原生版)"},
-                "subtitle": {"tag": "plain_text", "content": f"A/B 测试通道 | {date_str}"},
-                "template": "blue",
-                "ud_icon": {"tag": "standard_icon", "token": "bot_outlined"}
+                "title": {"tag": "plain_text", "content": "🌍 硅谷油管深极客"},
+                "subtitle": {"tag": "plain_text", "content": f"长内容认知折叠 | {date_str}"},
+                "template": "purple",
+                "ud_icon": {"tag": "standard_icon", "token": "video_outlined"}
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        # 截断以防止超飞书 30k 限制
-                        "content": markdown_text[:25000]
-                    }
-                },
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": "*🤖 此版本由 Claude 3.7 Sonnet 直出原生排版，未经二次干预*"
-                    }
-                }
-            ]
+            "elements": elements
         }
     }
-    
+
+def push_feishu_card(card_payload):
+    if not FEISHU_WEBHOOK_URL or not card_payload: 
+        print("📭 跳过飞书推送 (无URL或无内容)。")
+        return
     try:
-        resp = requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=10)
-        print(f"✅ 飞书 (Claude版) 推送成功: {resp.status_code}")
+        resp = requests.post(FEISHU_WEBHOOK_URL, json=card_payload, timeout=10)
+        print(f"✅ 飞书 (精美卡片版) 推送成功: {resp.status_code}")
     except Exception as e: print(f"❌ 飞书推送异常: {e}")
 
+
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 轨道二：Kimi 2.5 严苛 JSON 提取 (专供微信公众号组装)
+# 🚀 轨道二：Kimi 2.5 官方 SDK JSON 提取 (专供微信公众号组装)
 # ════════════════════════════════════════════════════════════════════════════
 def run_kimi_json_analysis(videos):
     if not videos or not KIMI_API_KEY: return []
-    print(f"\n[大脑 B] 呼叫 Kimi 2.5 (kimi-k2-5) 生成严苛 JSON (微信专用)...")
+    print(f"\n[大脑 B] 呼叫 Kimi 2.5 (kimi-k2-5 官方SDK) 生成严苛 JSON (微信专用)...")
     
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
     
-    prompt = f"""你是顶级硅谷创投分析师。以下是过去24小时内YouTube高价值AI对谈/讲座的全量字幕。
-请使用「金字塔原理」对这些内容进行深度拆解。
-
-【原始数据】：
-{json.dumps(payload, ensure_ascii=False)}
+    prompt = f"""你是顶级硅谷创投分析师。请对以下内容进行深度拆解。
+【原始数据】：{json.dumps(payload, ensure_ascii=False)}
 
 【处理要求】：
-1. 剔除广告，只保留真正有价值的内容。
-2. 🚨 极其重要：直接写正文内容，禁止自己输出“💡【TL;DR】”等前缀。
-3. 🚨 致命格式警告：必须输出绝对合法的 JSON！如果有双引号必须转义（\\"）。
+1. 剔除广告，保留真正有价值的内容。
+2. 直接写正文内容，禁止输出“💡【TL;DR】”等前缀。
+3. 必须输出绝对合法的 JSON！如果有双引号必须转义（\\"）。
 
 @@@START@@@
 {{
@@ -330,25 +363,24 @@ def run_kimi_json_analysis(videos):
 @@@END@@@
 """
     try:
-        # 🚨 核心修正：使用官方正确的模型代号 kimi-k2-5
-        resp = requests.post(
-            "https://api.moonshot.cn/v1/chat/completions",
-            headers={"Authorization": f"Bearer {KIMI_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "kimi-k2-5", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5}, 
-            timeout=240
+        # 🚨 核心修改：使用你提供的官方 OpenAI SDK 进行标准化调用
+        client = OpenAI(
+            api_key=KIMI_API_KEY,
+            base_url="https://api.moonshot.cn/v1"
         )
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
         
-        start = text.find("@@@START@@@") + 11
-        end = text.find("@@@END@@@")
-        json_str = text[start:end].strip() if start > 10 and end > -1 else text.strip('` \njson')
-        json_str = json_str.replace('\x00', '').replace('\x08', '')
+        response = client.chat.completions.create(
+            model="kimi-k2-5",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5
+        )
         
-        return json.loads(json_str).get("videos", [])
+        text = response.choices[0].message.content
+        return _extract_json(text)
     except Exception as e:
         print(f"  ❌ Kimi JSON 解析失败: {e}")
         return []
+
 
 def push_kimi_json_to_wechat(analyzed_videos):
     if not JIJIANYUN_WEBHOOK_URL or not analyzed_videos: 
@@ -415,7 +447,7 @@ def push_kimi_json_to_wechat(analyzed_videos):
 # ════════════════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V6.0 A/B 测试版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V7.0 精美卡片+官方SDK版) 启动")
     print("=" * 60)
     
     track_state = load_tracking_state()
@@ -429,16 +461,17 @@ def main():
         
     ready_videos = fetch_transcripts(all_videos)
     
-    # 🚀 赛道 1：Claude 生成原生 Markdown 发送给飞书
-    claude_md = run_claude_markdown_analysis(ready_videos)
-    push_claude_to_feishu(claude_md)
+    # 🚀 赛道 1：Claude 提取 JSON -> 组装成精美的飞书 Message Card
+    claude_data = run_claude_json_analysis(ready_videos)
+    feishu_card = build_youtube_feishu_card(claude_data)
+    push_feishu_card(feishu_card)
     
-    # 🚀 赛道 2：Kimi 生成严苛 JSON 发送给微信
-    kimi_json = run_kimi_json_analysis(ready_videos)
-    push_kimi_json_to_wechat(kimi_json)
+    # 🚀 赛道 2：Kimi (官方 openai SDK 方案) 提取 JSON -> 组装成微信 HTML
+    kimi_data = run_kimi_json_analysis(ready_videos)
+    push_kimi_json_to_wechat(kimi_data)
     
     save_tracking_state(track_state)
-    print("\n🎉 AB 测试双轨流水线执行完毕！")
+    print("\n🎉 双轨结构化流执行完毕！")
 
 if __name__ == "__main__":
     main()
