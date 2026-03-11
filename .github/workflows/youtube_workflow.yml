@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 3. 安装极简依赖 (🚨 新增了 openai 官方 SDK 依赖)
+      # 3. 安装极简依赖 (包含千问所需的 openai 官方 SDK)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -39,10 +39,10 @@ jobs:
       # 4. 执行核心自动化脚本
       - name: Run YouTube Tracker Script
         env:
-          # 🚨 动态读取密钥 (双引擎所需的所有密钥都在这里)
+          # 🚨 动态读取密钥 (已切换至千问 QWEN_API_KEY)
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
           JIJIANYUN_WEBHOOK_URL: ${{ secrets.JIJIANYUN_WEBHOOK_URL }}
         run: |
