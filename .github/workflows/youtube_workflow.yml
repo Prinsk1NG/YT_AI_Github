@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+# 🚨 添加全局环境变量：强制 GitHub Actions 使用最新的 Node.js 24 引擎，消除废弃警告
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   run-youtube-tracker:
     runs-on: ubuntu-latest
