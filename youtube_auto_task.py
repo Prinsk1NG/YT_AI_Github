@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v9.0 (视觉重构版：爆款标题 + 英文原名 + 摘要置顶)
+youtube_auto_task.py  v10.0 (视觉全案重构：爆款标题 + 抓马摘要 + 英文原名展示)
 Architecture: RSS/Search -> Jina / Firecrawl -> Claude(JSON) -> Feishu Card | Qwen(JSON) -> WeChat
 """
 
@@ -160,35 +160,36 @@ def fetch_transcripts(video_list):
     return valid_videos
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: 大模型深度拆解 (核心逻辑重构)
+# Phase 2: 大模型深度拆解 (视觉全案指令重构)
 # ════════════════════════════════════════════════════════════════════════════
 def build_llm_prompt(videos):
     payload = [{"channel": v["author"], "original_title": v["title"], "text": v["transcript"][:15000]} for v in videos]
-    return f"""你是顶级硅谷创投分析师，也在经营个人自媒体号。请对以下内容进行深度拆解，用网感更好的活泼用语风格。
+    return f"""你是顶级硅谷创投分析师，也在经营个人自媒体。请对以下内容进行深度拆解，用网感更好的活泼用语。
 
 【原始数据】：{json.dumps(payload, ensure_ascii=False)}
 
 【严格输出要求】：
-1. 你必须且只能输出一个合法的 JSON 对象，不要输出任何 markdown 标记、解释或寒暄。
-2. TITLE：基于今日抓取的所有内容，起一个5-10字的微信爆款标题（如"GPT震荡日，谁在偷偷布局"）。
-3. ARTICLE_SUMMARY：一句话总结本次所有情报中最吸睛、最具反共识、最抓马的科技动向，不超过 30 字。
+1. 你必须且只能输出一个合法的 JSON 对象，不要输出任何代码块标记（不要加 ```json）。
+2. article_title：基于今日内容，起一个5-10字的微信爆款标题。
+3. article_summary：总结本次情报中最吸引眼球的反共识认知、科技行业最新动向，一句话不超过 30 字。
 4. 视频列表中的每个视频：
-   - title: 极具深度的【中文】标题。
+   - title: 极具深度的中文标题。
    - original_english_title: 直接输出原视频的英文原标题。
-   - tldr: 一句话总结，不要带Emoji，不要带前缀。
+   - tldr: 一句话中文总结（TL;DR），不要带前缀。
+   - 🚨 极其重要：在所有的文本内容中，如果需要使用双引号，请务必使用反斜杠转义（\\"），严禁直接输出双引号以免破坏 JSON 结构。
 
-格式如下：
+格式必须完全符合：
 {{
   "article_title": "爆款标题",
-  "article_summary": "30字核心摘要",
+  "article_summary": "30字摘要",
   "videos": [
     {{
-      "title": "中文深度标题",
+      "title": "中文标题",
       "original_english_title": "Original English Title",
       "tldr": "视频核心结论的一句话总结",
       "core_thesis": "最核心逻辑",
       "arguments": ["论点1", "论点2"],
-      "counter_consensus": "反常规偏见与认知",
+      "counter_consensus": "反常规认知",
       "implications": "对市场的具体影响"
     }}
   ]
@@ -197,7 +198,9 @@ def build_llm_prompt(videos):
 
 def _extract_global_json(text):
     try:
-        json_match = re.search(r'\{[\s\S]*\}', text)
+        # 尝试暴力清洗大模型可能输出的非法控制字符或 Markdown 标记
+        clean_text = text.replace('```json', '').replace('```', '').strip()
+        json_match = re.search(r'\{[\s\S]*\}', clean_text)
         if not json_match: return {}
         data = json.loads(json_match.group(0))
         return data
@@ -210,7 +213,7 @@ def run_claude_analysis(videos):
     if not videos or not OPENROUTER_API_KEY: return {}
     print("\n[大脑 A] 呼叫 Claude 3.7 策划全案 (飞书专用)...")
     try:
-        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": build_llm_prompt(videos)}], "temperature": 0.5}, timeout=240)
+        resp = requests.post("[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model": "anthropic/claude-3.7-sonnet", "messages": [{"role": "user", "content": build_llm_prompt(videos)}], "temperature": 0.5}, timeout=240)
         return _extract_global_json(resp.json()["choices"][0]["message"]["content"])
     except: return {}
 
@@ -219,36 +222,36 @@ def run_qwen_analysis(videos):
     if not videos or not QWEN_API_KEY: return {}
     print(f"\n[大脑 B] 呼叫 千问 qwen-max 策划全案 (微信专用)...")
     try:
-        client = OpenAI(api_key=QWEN_API_KEY, base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+        client = OpenAI(api_key=QWEN_API_KEY, base_url="[https://dashscope-intl.aliyuncs.com/compatible-mode/v1](https://dashscope-intl.aliyuncs.com/compatible-mode/v1)")
         resp = client.chat.completions.create(model="qwen-max", messages=[{"role": "user", "content": build_llm_prompt(videos)}], temperature=0.5)
         return _extract_global_json(resp.choices[0].message.content)
     except: return {}
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 3: 飞书呈现层重构
+# Phase 3: 飞书视觉重构 (V10.0 版)
 # ════════════════════════════════════════════════════════════════════════════
 def push_to_feishu(data):
     if not FEISHU_WEBHOOK_URL or not data: return
     date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     
-    art_title = data.get("article_title", "硅谷吃瓜零时差")
+    art_title = data.get("article_title", "硅谷 AI 情报")
     art_summary = data.get("article_summary", "今日硬核 AI 深度情报提取")
 
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每早8点准时更新 | 从昨晚放出的深度访谈里拆解硅谷**"}, "icon": {"tag": "standard_icon", "token": "time_outlined", "color": "blue"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"💡 **导读**：{art_summary}"}},
+        {"tag": "note", "elements": [{"tag": "lark_md", "content": f"💡 **今日摘要**：{art_summary}"}], "background_color": "blue"},
         {"tag": "hr"}
     ]
     
     for i, v in enumerate(data.get("videos", []), 1):
-        en_title = v.get("original_english_title", "Original Title Unknown")
+        en_title = v.get("original_english_title", "Original Title")
         tldr = v.get("tldr", "无摘要")
         
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {v.get('title', '深度访谈')}**"}})
         
-        # TLDR 模块：第一行英文标题，第二行中文总结
-        tldr_content = f"💡 {en_title}\n**TL;DR:** {tldr}"
-        elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": tldr_content}], "background_color": "blue"})
+        # TLDR 模块：显示英文原标题和中文 TLDR
+        tldr_content = f"💡 {en_title}\n\n**TL;DR:** {tldr}"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": tldr_content}})
         
         args_text = "\n".join([f"• {str(arg).strip()}" for arg in v.get('arguments', [])])
         content_md = (f"**🎯 核心主张**\n{v.get('core_thesis','')}\n\n"
@@ -274,12 +277,12 @@ def push_to_feishu(data):
     requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=10)
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 4: 微信呈现层重构
+# Phase 4: 微信视觉重构 (V10.0 版)
 # ════════════════════════════════════════════════════════════════════════════
 def push_to_wechat(data):
     if not JIJIANYUN_WEBHOOK_URL or not data: return
     
-    art_title = data.get("article_title", "硅谷吃瓜零时差")
+    art_title = data.get("article_title", "硅谷 AI 深度追踪")
     art_summary = data.get("article_summary", "今日硬核 AI 深度情报提取")
     
     html_parts = [
@@ -290,7 +293,7 @@ def push_to_wechat(data):
     ]
 
     for i, v in enumerate(data.get("videos", []), 1):
-        en_title = v.get("original_english_title", "English Title")
+        en_title = v.get("original_english_title", "Original English Title")
         tldr = v.get("tldr", "No TLDR")
         args_html = "".join([f'<li style="margin-bottom: 8px;">{str(a).strip()}</li>' for a in v.get('arguments', [])])
 
@@ -299,12 +302,16 @@ def push_to_wechat(data):
             <h2 style="font-size: 18px; color: #2b579a; margin-bottom: 15px; border-bottom: 2px solid #2b579a; padding-bottom: 5px;">🍉 {i}. {v.get('title')}</h2>
             <section style="background-color: #eef2f8; padding: 12px; border-radius: 6px; margin-bottom: 15px;">
                 <p style="margin: 0 0 8px 0; font-size: 14px; color: #333; font-weight: bold;">💡 {en_title}</p>
-                <p style="margin: 0; font-size: 14px; color: #555;"><strong>TL;DR:</strong> {tldr}</p>
+                <p style="margin: 0; font-size: 14px; color: #555; line-height:1.5;"><strong>TL;DR:</strong> {tldr}</p>
             </section>
-            <p style="margin: 0 0 5px 0; font-size: 15px;"><strong>🎯 核心主张：</strong></p><p style="margin: 0 0 15px 0; color:#555;">{v.get('core_thesis')}</p>
-            <p style="margin: 0 0 5px 0; font-size: 15px;"><strong>🧱 论点与证据链：</strong></p><ul style="padding-left: 20px; color:#555;">{args_html}</ul>
-            <p style="margin: 0 0 5px 0; font-size: 15px;"><strong>🧠 反共识与认知盲区：</strong></p><p style="margin: 0 0 15px 0; color:#555;">{v.get('counter_consensus')}</p>
-            <p style="margin: 0 0 5px 0; font-size: 15px;"><strong>💼 产业与投资推演：</strong></p><p style="margin: 0 0 15px 0; color:#555;">{v.get('implications')}</p>
+            <p style="margin: 0 0 5px 0; font-size: 15px; font-weight:bold; color:#333;">🎯 核心主张：</p>
+            <p style="margin: 0 0 15px 0; font-size: 14px; color:#555; line-height:1.6;">{v.get('core_thesis')}</p>
+            <p style="margin: 0 0 5px 0; font-size: 15px; font-weight:bold; color:#333;">🧱 论点与证据链：</p>
+            <ul style="padding-left: 20px; font-size: 14px; color:#555; line-height:1.6;">{args_html}</ul>
+            <p style="margin: 0 0 5px 0; font-size: 15px; font-weight:bold; color:#333;">🧠 反共识与认知盲区：</p>
+            <p style="margin: 0 0 15px 0; font-size: 14px; color:#555; line-height:1.6;">{v.get('counter_consensus')}</p>
+            <p style="margin: 0 0 5px 0; font-size: 15px; font-weight:bold; color:#333;">💼 产业与投资推演：</p>
+            <p style="margin: 0 0 15px 0; font-size: 14px; color:#555; line-height:1.6;">{v.get('implications')}</p>
             <hr style="border: none; border-top: 1px dashed #e1e4e8; margin-top: 25px;">
         </section>
         """
@@ -319,7 +326,7 @@ def push_to_wechat(data):
 # ════════════════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V9.0 视觉重构版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V10.0 视觉策划重构版) 启动")
     print("=" * 60)
     track_state = load_tracking_state()
     rss_v = scan_rss_channels(track_state)
@@ -328,16 +335,16 @@ def main():
     if not all_v: return
     ready_v = fetch_transcripts(all_v)
     
-    # 飞书侧：由 Claude 3.7 生成
+    # 飞书侧：由 Claude 3.7 生成 (精美卡片)
     claude_data = run_claude_analysis(ready_v)
     push_to_feishu(claude_data)
     
-    # 微信侧：由 Qwen-Max 生成
+    # 微信侧：由 Qwen-Max 生成 (爆款排版)
     qwen_data = run_qwen_analysis(ready_v)
     push_to_wechat(qwen_data)
     
     save_tracking_state(track_state)
-    print("\n🎉 V9.0 视觉重构版分发完毕！")
+    print("\n🎉 V10.0 视觉策划全案分发完毕！")
 
 if __name__ == "__main__":
     main()
