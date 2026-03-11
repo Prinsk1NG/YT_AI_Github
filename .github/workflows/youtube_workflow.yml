@@ -44,16 +44,17 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
-          # 🚨 新增：极简云 Webhook 密钥
           JIJIANYUN_WEBHOOK_URL: ${{ secrets.JIJIANYUN_WEBHOOK_URL }}
         run: |
           python youtube_auto_task.py
 
-      # 5. 自动保存状态文件
+      # 5. 自动保存状态文件 (加入 rebase 防止代码冲突报错)
       - name: Commit and push tracking state
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add data/yt_tracking.json
           git commit -m "chore: 自动更新 YouTube 追踪与淘汰状态 [skip ci]" || echo "No changes to commit"
+          # 🚨 核心修复：提交前先拉取远程最新代码进行合并，防止因为你手动改了代码导致推送失败
+          git pull --rebase origin main
           git push
