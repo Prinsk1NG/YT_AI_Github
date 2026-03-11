@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v7.0 (飞书精美卡片版 + Kimi 2.5 官方SDK版)
-Architecture: RSS/Search -> Jina / Firecrawl -> Claude(JSON)->Feishu Card & Kimi(JSON)->WeChat
+youtube_auto_task.py  v8.0 (AB双擎版：Claude发飞书 + 千问发微信)
+Architecture: RSS/Search -> Jina / Firecrawl -> Claude(JSON)->Feishu Card & Qwen(JSON)->WeChat
 """
 
 import os
@@ -14,12 +14,12 @@ from pathlib import Path
 import html
 import requests
 import feedparser
-from openai import OpenAI  # 🚨 引入官方库
+from openai import OpenAI  # 🚨 引入官方库 (千问完全兼容 OpenAI SDK)
 
 # ── Environment variables ────────────────────────────────────────────────────
 FEISHU_WEBHOOK_URL    = os.getenv("FEISHU_WEBHOOK_URL", "")
 OPENROUTER_API_KEY    = os.getenv("OPENROUTER_API_KEY", "")
-KIMI_API_KEY          = os.getenv("KIMI_API_KEY", "")
+QWEN_API_KEY          = os.getenv("QWEN_API_KEY", "")  # 🚨 替换为千问 API KEY
 FIRECRAWL_API_KEY     = os.getenv("FIRECRAWL_API_KEY", "")
 
 # 🚨 极简云与微信公众号相关配置
@@ -329,11 +329,11 @@ def push_feishu_card(card_payload):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 🚀 轨道二：Kimi 2.5 官方 SDK JSON 提取 (专供微信公众号组装)
+# 🚀 轨道二：通义千问 (Qwen) 官方 SDK JSON 提取 (专供微信公众号组装)
 # ════════════════════════════════════════════════════════════════════════════
-def run_kimi_json_analysis(videos):
-    if not videos or not KIMI_API_KEY: return []
-    print(f"\n[大脑 B] 呼叫 Kimi 最新版 (kimi-latest 官方SDK) 生成严苛 JSON (微信专用)...")
+def run_qwen_json_analysis(videos):
+    if not videos or not QWEN_API_KEY: return []
+    print(f"\n[大脑 B] 呼叫 千问大模型 (qwen-max 官方SDK) 生成严苛 JSON (微信专用)...")
     
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
     
@@ -363,14 +363,14 @@ def run_kimi_json_analysis(videos):
 @@@END@@@
 """
     try:
-        # 🚨 核心修改：使用官方 OpenAI SDK 进行标准化调用，并将模型改为 kimi-latest 解决 404 权限问题
+        # 🚨 核心修改：使用阿里云 DashScope 的兼容端点，调用千问最强模型 qwen-max
         client = OpenAI(
-            api_key=KIMI_API_KEY,
-            base_url="https://api.moonshot.cn/v1"
+            api_key=QWEN_API_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         
         response = client.chat.completions.create(
-            model="kimi-latest",
+            model="qwen-max",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5
         )
@@ -378,22 +378,22 @@ def run_kimi_json_analysis(videos):
         text = response.choices[0].message.content
         return _extract_json(text)
     except Exception as e:
-        print(f"  ❌ Kimi JSON 解析失败: {e}")
+        print(f"  ❌ 千问 JSON 解析失败: {e}")
         return []
 
 
-def push_kimi_json_to_wechat(analyzed_videos):
+def push_qwen_json_to_wechat(analyzed_videos):
     if not JIJIANYUN_WEBHOOK_URL or not analyzed_videos: 
-        print("📭 跳过微信推送 (无URL或无Kimi数据)。")
+        print("📭 跳过微信推送 (无URL或无千问数据)。")
         return
 
-    print(f"\n[装配] 正在将 Kimi 的 JSON 组装成标准微信 HTML...")
+    print(f"\n[装配] 正在将 千问 的 JSON 组装成标准微信 HTML...")
     date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     article_title = f"硅谷吃瓜零时差 | 每日AI追踪 {date_str}"
     
     html_parts = []
     html_parts.append(f'<section style="text-align: center; margin-bottom: 20px;"><img src="{TOP_IMAGE_URL}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" /></section>')
-    html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | Kimi结构化版</strong><br>本篇内容由 Kimi 2.5 大模型进行底层重构与逻辑拆解。</p></section>')
+    html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | 千问结构化版</strong><br>本篇内容由 阿里通义千问 (Qwen-Max) 大模型进行底层重构与逻辑拆解。</p></section>')
 
     for i, v in enumerate(analyzed_videos, 1):
         title = str(v.get('title', '重磅访谈')).replace('🍉', '').replace('#', '').strip()
@@ -426,7 +426,7 @@ def push_kimi_json_to_wechat(analyzed_videos):
         """
         html_parts.append(video_html)
 
-    html_parts.append('<section style="text-align: center; margin-top: 30px;"><p style="font-size: 12px; color: #999;">* 本文由 Kimi 大模型全自动逻辑重组生成 *</p></section>')
+    html_parts.append('<section style="text-align: center; margin-top: 30px;"><p style="font-size: 12px; color: #999;">* 本文由 通义千问全自动逻辑重组生成 *</p></section>')
     final_html = "".join(html_parts).replace('\n', '').replace('\r', '')
 
     payload = {
@@ -438,7 +438,7 @@ def push_kimi_json_to_wechat(analyzed_videos):
 
     try:
         resp = requests.post(JIJIANYUN_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
-        print(f"✅ 微信 (Kimi版) 推送成功: {resp.status_code}")
+        print(f"✅ 微信 (千问版) 推送成功: {resp.status_code}")
     except Exception as e:
         print(f"❌ 微信推送失败: {e}")
 
@@ -447,7 +447,7 @@ def push_kimi_json_to_wechat(analyzed_videos):
 # ════════════════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V7.0 精美卡片+官方SDK版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V8.0 AB双擎: Claude+千问版) 启动")
     print("=" * 60)
     
     track_state = load_tracking_state()
@@ -466,9 +466,9 @@ def main():
     feishu_card = build_youtube_feishu_card(claude_data)
     push_feishu_card(feishu_card)
     
-    # 🚀 赛道 2：Kimi (官方 openai SDK 方案) 提取 JSON -> 组装成微信 HTML
-    kimi_data = run_kimi_json_analysis(ready_videos)
-    push_kimi_json_to_wechat(kimi_data)
+    # 🚀 赛道 2：千问 (官方 openai SDK 方案) 提取 JSON -> 组装成微信 HTML
+    qwen_data = run_qwen_json_analysis(ready_videos)
+    push_qwen_json_to_wechat(qwen_data)
     
     save_tracking_state(track_state)
     print("\n🎉 双轨结构化流执行完毕！")
