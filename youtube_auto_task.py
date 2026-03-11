@@ -333,7 +333,7 @@ def push_feishu_card(card_payload):
 # ════════════════════════════════════════════════════════════════════════════
 def run_kimi_json_analysis(videos):
     if not videos or not KIMI_API_KEY: return []
-    print(f"\n[大脑 B] 呼叫 Kimi 2.5 (kimi-k2-5 官方SDK) 生成严苛 JSON (微信专用)...")
+    print(f"\n[大脑 B] 呼叫 Kimi 最新版 (kimi-latest 官方SDK) 生成严苛 JSON (微信专用)...")
     
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "..." if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
     
@@ -363,14 +363,14 @@ def run_kimi_json_analysis(videos):
 @@@END@@@
 """
     try:
-        # 🚨 核心修改：使用你提供的官方 OpenAI SDK 进行标准化调用
+        # 🚨 核心修改：使用官方 OpenAI SDK 进行标准化调用，并将模型改为 kimi-latest 解决 404 权限问题
         client = OpenAI(
             api_key=KIMI_API_KEY,
             base_url="https://api.moonshot.cn/v1"
         )
         
         response = client.chat.completions.create(
-            model="kimi-k2-5",
+            model="kimi-latest",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5
         )
