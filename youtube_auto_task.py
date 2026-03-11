@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v4.0 (纯净排版 + Firecrawl 强力引擎版)
-Architecture: RSS + Native Search -> Jina / Firecrawl / Mirror -> Claude 3.7 -> Feishu
+youtube_auto_task.py  v5.0 (双端引擎：飞书推送 + 极简云微信排版直通版)
+Architecture: RSS + Native Search -> Jina / Firecrawl / Mirror -> Claude 3.7 -> Feishu & JiJianYun
 """
 
 import os
@@ -16,13 +16,20 @@ import requests
 import feedparser
 
 # ── Environment variables ────────────────────────────────────────────────────
-FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-KIMI_API_KEY       = os.getenv("KIMI_API_KEY", "")
-FIRECRAWL_API_KEY  = os.getenv("FIRECRAWL_API_KEY", "") # Plan B 专属密钥
+FEISHU_WEBHOOK_URL    = os.getenv("FEISHU_WEBHOOK_URL", "")
+OPENROUTER_API_KEY    = os.getenv("OPENROUTER_API_KEY", "")
+KIMI_API_KEY          = os.getenv("KIMI_API_KEY", "")
+FIRECRAWL_API_KEY     = os.getenv("FIRECRAWL_API_KEY", "")
+
+# 🚨 极简云与微信公众号相关配置
+JIJIANYUN_WEBHOOK_URL = os.getenv("JIJIANYUN_WEBHOOK_URL", "") # 请在 GitHub Secrets 添加此变量
+COVER_MEDIA_ID        = "这里填入你真实的微信封面图media_id"
+TOP_IMAGE_URL         = "http://mmbiz.qpic.cn/sz_mmbiz_png/SfPwFYYicIliagEk8zLcesc7sBVZqibHnxN8khWb60NicWDGKiaKQum7ysAXHwXW1RF4zKLKnMrsKYBDO5U3mPIhye2r4Zzdwica9XqaMWiaW8zU7s/0?wx_fmt=png"
 
 if FIRECRAWL_API_KEY:
     print("🚀 已挂载 Firecrawl 顶级大模型爬虫引擎作为重装 Plan B...")
+if JIJIANYUN_WEBHOOK_URL:
+    print("🚀 已挂载 极简云 Webhook 微信自动化推送通道...")
 
 # ── Tracking & Thresholds ────────────────────────────────────────────────────
 MIN_DURATION_SEC = 15 * 60   # 最短 15 分钟
@@ -192,7 +199,7 @@ def fetch_transcripts(video_list):
         full_text = ""
         yt_url = f"https://www.youtube.com/watch?v={vid}"
         
-        # 🟢 Plan A: Jina AI Reader API (零成本，最优先)
+        # 🟢 Plan A: Jina AI Reader API
         try:
             print(f"  ➡️ [Plan A] 呼叫 Jina 提取: {vid}")
             jina_url = f"https://r.jina.ai/{yt_url}"
@@ -207,7 +214,7 @@ def fetch_transcripts(video_list):
         except Exception as e:
             print(f"  [Debug] Jina 引擎未命中: {e}")
 
-        # 🟡 Plan B: Firecrawl API (顶级大模型爬虫，成功率极高，专破防爬墙)
+        # 🟡 Plan B: Firecrawl API
         if (not full_text or len(full_text) < 500) and FIRECRAWL_API_KEY:
             try:
                 print(f"  ➡️ [Plan B] Jina 失效，启动 Firecrawl 强力解析...")
@@ -233,7 +240,7 @@ def fetch_transcripts(video_list):
             except Exception as e:
                 print(f"  [Debug] Firecrawl 引擎请求失败: {e}")
 
-        # 🟠 Plan C: 第三方 YouTube Transcript 聚合镜像站
+        # 🟠 Plan C: 第三方公共镜像站
         if not full_text or len(full_text) < 500:
             try:
                 print(f"  ➡️ [Plan C] 切换公共镜像站...")
@@ -263,10 +270,8 @@ def llm_deep_analysis(videos):
     if not videos: return []
     print(f"\n[大脑] 提交 {len(videos)} 个长视频给 LLM 进行金字塔分析...")
     
-    # 构建压缩版的 JSON，防止超长
     payload = [{"channel": v["author"], "title": v["title"], "tag": v["category"], "text": v["transcript"][:15000] + "\n...\n" + v["transcript"][-15000:] if len(v["transcript"])>30000 else v["transcript"]} for v in videos]
     
-    # 🚨 终极修复：严令禁止大模型自己输出标题前缀和乱码符号，彻底解决叠加问题
     prompt = f"""你是顶级硅谷创投分析师。以下是过去24小时内YouTube高价值AI对谈/讲座的全量字幕。
 请使用「金字塔原理」对这些长内容进行降维打击级的深度拆解。
 
@@ -326,7 +331,7 @@ def _extract_json(text):
         return []
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 4: Feishu 研报级卡片排版渲染 (彻底清洗乱码版)
+# Phase 4A: Feishu 研报级卡片排版渲染
 # ════════════════════════════════════════════════════════════════════════════
 def build_youtube_feishu_card(analyzed_videos):
     if not analyzed_videos: return None
@@ -335,7 +340,6 @@ def build_youtube_feishu_card(analyzed_videos):
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 每日早8点准时更新 | 深度长视频拆解 | 认知升级引擎**"}, "icon": {"tag": "standard_icon", "token": "time_outlined", "color": "blue"}}, {"tag": "hr"}]
     
     for i, v in enumerate(analyzed_videos, 1):
-        # 强制在代码层清洗掉大模型可能手欠加上的乱码和前缀
         title = str(v.get('title', '重磅访谈提取')).replace('🍉', '').replace('#', '').strip()
         tldr = str(v.get('tldr', '暂无摘要')).replace('💡【TL;DR】', '').replace('【TL;DR】', '').replace('💡', '').strip()
         core = str(v.get('core_thesis', '')).replace('🎯 核心主张：', '').replace('🎯 核心主张', '').replace('🎯', '').strip()
@@ -345,20 +349,15 @@ def build_youtube_feishu_card(analyzed_videos):
         args_list = v.get('arguments', [])
         args_text = "\n".join([f"• {str(arg).replace('•', '').strip()}" for arg in args_list])
 
-        # 使用最稳妥的粗体标记，取代容易导致飞书报错的 ## 语法
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🍉 {i}. {title}**"}})
-        
-        # 蓝色背景引言区域
         elements.append({"tag": "note", "elements": [{"tag": "lark_md", "content": f"📺 **频道/来源**：{v.get('channel', '未知频道')} | 🏷️ **标签**：{v.get('category', '科技播客')}\n💡 **【TL;DR】** {tldr}"}], "background_color": "blue"})
         
-        # 正文内容堆叠 (强制统一注入表情符号，杜绝套娃)
         content_md = (
             f"**🎯 核心主张**\n<font color='grey'>{core}</font>\n\n"
             f"**🧱 论点与证据链**\n<font color='grey'>{args_text}</font>\n\n"
             f"**🧠 反共识与认知盲区**\n<font color='grey'>{counter}</font>\n\n"
             f"**💼 产业与投资推演**\n<font color='grey'>{imp}</font>"
         )
-        
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content_md}})
         elements.append({"tag": "hr"})
         
@@ -373,9 +372,96 @@ def push_to_feishu(card_payload):
         print(f"✅ 飞书推送成功: {resp.status_code}")
     except Exception as e: print(f"❌ 飞书推送异常: {e}")
 
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 4B: 极简云 Webhook 微信公众号直通排版引擎
+# ════════════════════════════════════════════════════════════════════════════
+def push_to_jijianyun_webhook(analyzed_videos):
+    if not JIJIANYUN_WEBHOOK_URL or not analyzed_videos: 
+        print("📭 未配置极简云 Webhook，跳过微信排版与推送。")
+        return
+
+    print(f"\n[推送] 正在生成标准微信 HTML 并推送到极简云...")
+    
+    date_str = datetime.datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    article_title = f"硅谷吃瓜零时差 | 每日AI追踪 {date_str}"
+    
+    # 构建完美适配微信公众号的 HTML 字符串 (使用内联样式)
+    html_parts = []
+    
+    # 顶部固定封面大图（赛博西瓜）
+    html_parts.append(f'<section style="text-align: center; margin-bottom: 20px;"><img src="{TOP_IMAGE_URL}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" /></section>')
+    
+    # 导语框
+    html_parts.append(f'<section style="margin-bottom: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 5px solid #2b579a;"><p style="margin: 0; font-size: 15px; color: #333; line-height: 1.6;"><strong>⚠️ 每日早 8 点更新 | 深度长视频拆解 | 认知升级引擎</strong><br>以下是过去 24 小时内硅谷最具价值的硬核技术对谈深度提炼。</p></section>')
+
+    # 循环遍历组装每个话题的 HTML 卡片
+    for i, v in enumerate(analyzed_videos, 1):
+        title = str(v.get('title', '重磅访谈提取')).replace('🍉', '').replace('#', '').strip()
+        channel = str(v.get('channel', '未知频道'))
+        tag = str(v.get('category', '科技播客'))
+        tldr = str(v.get('tldr', '暂无摘要')).replace('💡【TL;DR】', '').replace('【TL;DR】', '').replace('💡', '').strip()
+        core = str(v.get('core_thesis', '')).replace('🎯 核心主张：', '').replace('🎯 核心主张', '').replace('🎯', '').strip()
+        counter = str(v.get('counter_consensus', '')).replace('🧠 反共识认知：', '').replace('🧠 反共识认知', '').replace('🧠', '').strip()
+        imp = str(v.get('implications', '')).replace('💼 产业与投资推演：', '').replace('💼 产业与投资推演', '').replace('💼', '').strip()
+        
+        args_html = ""
+        for arg in v.get('arguments', []):
+            clean_arg = str(arg).replace("•", "").strip()
+            args_html += f'<li style="margin-bottom: 8px;">{clean_arg}</li>'
+
+        video_html = f"""
+        <section style="margin-bottom: 40px;">
+            <h2 style="font-size: 18px; color: #2b579a; margin-bottom: 15px; border-bottom: 2px solid #2b579a; padding-bottom: 5px;">🍉 {i}. {title}</h2>
+            
+            <section style="background-color: #eef2f8; padding: 12px; border-radius: 6px; margin-bottom: 15px;">
+                <p style="margin: 0 0 8px 0; font-size: 13px; color: #666;">📺 频道：{channel} &nbsp;|&nbsp; 🏷️ 标签：{tag}</p>
+                <p style="margin: 0; font-size: 15px; color: #333; font-weight: bold;">💡 TL;DR: <span style="font-weight: normal;">{tldr}</span></p>
+            </section>
+            
+            <p style="margin: 0 0 8px 0; font-size: 15px; color: #333;"><strong>🎯 核心主张：</strong></p>
+            <p style="margin: 0 0 15px 0; font-size: 15px; color: #555; line-height: 1.6;">{core}</p>
+            
+            <p style="margin: 0 0 8px 0; font-size: 15px; color: #333;"><strong>🧱 论点与证据链：</strong></p>
+            <ul style="margin: 0 0 15px 0; padding-left: 20px; font-size: 15px; color: #555; line-height: 1.6;">
+                {args_html}
+            </ul>
+            
+            <p style="margin: 0 0 8px 0; font-size: 15px; color: #333;"><strong>🧠 反共识与认知盲区：</strong></p>
+            <p style="margin: 0 0 15px 0; font-size: 15px; color: #555; line-height: 1.6;">{counter}</p>
+            
+            <p style="margin: 0 0 8px 0; font-size: 15px; color: #333;"><strong>💼 产业与投资推演：</strong></p>
+            <p style="margin: 0 0 15px 0; font-size: 15px; color: #555; line-height: 1.6;">{imp}</p>
+            
+            <hr style="border: none; border-top: 1px dashed #e1e4e8; margin-top: 25px;">
+        </section>
+        """
+        html_parts.append(video_html)
+
+    html_parts.append('<section style="text-align: center; margin-top: 30px;"><p style="font-size: 12px; color: #999;">* 本文由 AI 追踪 YouTube 创投频道全自动排版生成 *</p></section>')
+
+    # 🚨 终极防爆处理：将换行符全部抹平
+    final_html = "".join(html_parts).replace('\n', '').replace('\r', '')
+
+    # 🚨 严格按照极简云参数文档匹配 Key
+    payload = {
+        "author": "硅谷吃瓜",        # 对应参数：内容作者
+        "cover_jpg": TOP_IMAGE_URL,   # 对应参数：内容的JPG格式封面图
+        "html_content": final_html,   # 对应参数：内容的HTML格式内容
+        "title": article_title        # 对应参数：内容标题
+    }
+
+    try:
+        resp = requests.post(JIJIANYUN_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+        print(f"✅ 成功投递至极简云 Webhook, 状态码: {resp.status_code}")
+    except Exception as e:
+        print(f"❌ 发送至极简云失败: {e}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# 核心主循环
+# ════════════════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("🚀 YouTube 播客深度深研系统 (V4.0 纯净排版 + Firecrawl 装甲版) 启动")
+    print("🚀 YouTube 播客深度深研系统 (V5.0 双端引擎版) 启动")
     print("=" * 60)
     
     track_state = load_tracking_state()
@@ -390,11 +476,16 @@ def main():
         
     ready_videos = fetch_transcripts(all_videos)
     analyzed_data = llm_deep_analysis(ready_videos)
+    
+    # 1. 飞书卡片推送通道
     card = build_youtube_feishu_card(analyzed_data)
     push_to_feishu(card)
     
+    # 2. 极简云 Webhook 微信直通通道
+    push_to_jijianyun_webhook(analyzed_data)
+    
     save_tracking_state(track_state)
-    print("\n🎉 YouTube 深度情报提取流执行完毕！")
+    print("\n🎉 YouTube 深度情报提取与双端分发流执行完毕！")
 
 if __name__ == "__main__":
     main()
