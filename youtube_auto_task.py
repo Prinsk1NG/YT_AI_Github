@@ -283,8 +283,8 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
             "card": {
                 "config": {"wide_screen_mode": True}, 
                 "header": {
-                    "title": {"tag": "plain_text", "content": "🌍 过去 24h 硅谷人物深度访谈拆解"}, 
-                    "subtitle": {"tag": "plain_text", "content": f"{sanitize_text(wrapup['article_title'])} | {date_str}"}, 
+                    "title":  {"tag": "plain_text", "content": f"{sanitize_text(wrapup['article_title'])} | {date_str}"},  
+                    "subtitle":{"tag": "plain_text", "content": "🌍 长播客拆解：过去24h的硅谷人物深度访谈"}, 
                     "template": "purple"
                 }, 
                 "elements": elements
