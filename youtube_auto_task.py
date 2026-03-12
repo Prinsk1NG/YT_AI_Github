@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-youtube_auto_task.py  v23.1 (URL链路修复版：飞书动态标题 + 微信摘要倒置 + Claude防爆加固)
+youtube_auto_task.py  v26.0 (Base64 URL终极防腐版 + 强力爆款标题 + 飞书排版对位)
 Architecture: Search -> LLM Filter -> Top 5 Synthesis -> AI Cover Gen -> ImgBB -> Distribution
 """
 
@@ -12,7 +12,6 @@ import datetime
 import base64
 from datetime import timezone, timedelta
 from pathlib import Path
-import html
 import requests
 import feedparser
 from openai import OpenAI
@@ -31,7 +30,19 @@ try:
 except:
     KIMI_TEMPERATURE  = 0.3
 
-DEFAULT_COVER_URL     = "http://mmbiz.qpic.cn/sz_mmbiz_png/SfPwFYYicIliagEk8zLcesc7sBVZqibHnxN8khWb60NicWDGKiaKQum7ysAXHwXW1RF4zKLKnMrsKYBDO5U3mPIhye2r4Zzdwica9XqaMWiaW8zU7s/0?wx_fmt=png"
+# ── Base64 URL 隐身术 (彻底防止编辑器将代码内的网址转换为Markdown超链接) ──
+def D(b64_str):
+    return base64.b64decode(b64_str).decode("utf-8")
+
+URL_YT_RSS = D("aHR0cHM6Ly93d3cueW91dHViZS5jb20vZmVlZHMvdmlkZW9zLnhtbD9jaGFubmVsX2lkPQ==")
+URL_YT_SEARCH = D("aHR0cHM6Ly93d3cueW91dHViZS5jb20vcmVzdWx0cz9zZWFyY2hfcXVlcnk9")
+URL_YT_WATCH = D("aHR0cHM6Ly93d3cueW91dHViZS5jb20vd2F0Y2g/dj0=")
+URL_JINA = D("aHR0cHM6Ly9yLmppbmEuYWkv")
+URL_OPENROUTER = D("aHR0cHM6Ly9vcGVucm91dGVyLmFpL2FwaS92MS9jaGF0L2NvbXBsZXRpb25z")
+URL_MOONSHOT = D("aHR0cHM6Ly9hcGkubW9vbnNob3QuY24vdjE=")
+URL_SILICONFLOW = D("aHR0cHM6Ly9hcGkuc2lsaWNvbmZsb3cuY24vdjEvaW1hZ2VzL2dlbmVyYXRpb25z")
+URL_IMGBB = D("aHR0cHM6Ly9hcGkuaW1nYmIuY29tLzEvdXBsb2Fk")
+DEFAULT_COVER_URL = D("aHR0cDovL21tYml6LnFwaWMuY24vc3pfbW1iaXpfcG5nL1NmUHdGWVlpY0lsaWFnRWs4ekxjZXNjN3NCVlpxaWJIbnhOOGtoV2I2ME5pY1dER0tpYUtRdW03eXNBWEh3WFcxUkY0ektMS25NcnNLWUJETzVVM21QSWh5ZTJyNFp6ZHdpY2E5WHFhTVdpYVc4elU3cy8wP3d4X2ZtdD1wbmc=")
 
 # ── 飞书多 Webhook 支持 ──────────────────────────────────────────
 def get_feishu_webhooks() -> list:
@@ -73,8 +84,18 @@ def sanitize_text(text):
     clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
+def safe_parse_json(text):
+    text = text.replace('```json', '').replace('```', '').strip()
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except:
+            pass
+    return None
+
 # ════════════════════════════════════════════════════════════════
-# Phase 1: 扫描与过滤
+# Phase 1: 扫描与过滤 (URL 防腐保护)
 # ════════════════════════════════════════════════════════════════
 def scan_best_videos_strictly():
     print(f"\n[扫描] 启动 24H 引擎，构建 {CANDIDATE_POOL_SIZE} 大候补池...")
@@ -84,7 +105,7 @@ def scan_best_videos_strictly():
 
     for ch_id, info in CORE_CHANNELS.items():
         try:
-            feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={ch_id}")
+            feed = feedparser.parse(URL_YT_RSS + ch_id)
             for entry in feed.entries:
                 pub_time = datetime.datetime.strptime(entry.published, "%Y-%m-%dT%H:%M:%S%z")
                 if pub_time > deadline:
@@ -93,7 +114,7 @@ def scan_best_videos_strictly():
 
     for vip in VIP_LIST:
         try:
-            url = f"https://www.youtube.com/results?search_query={requests.utils.quote(vip + ' interview')}&sp=EgQIAhAB"
+            url = URL_YT_SEARCH + requests.utils.quote(vip + ' interview') + "&sp=EgQIAhAB"
             headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
             html_text = requests.get(url, headers=headers, timeout=15).text
             
@@ -125,9 +146,9 @@ def scan_best_videos_strictly():
 
 def run_single_video_analysis(video, model_type="claude"):
     print(f"  🎬 正在解剖: {video['title'][:30]}...")
-    yt_url = f"https://www.youtube.com/watch?v={video['video_id']}"
+    yt_url = URL_YT_WATCH + video['video_id']
     try:
-        resp = requests.get(f"https://r.jina.ai/{yt_url}", headers={"X-Return-Format": "text"}, timeout=40)
+        resp = requests.get(URL_JINA + yt_url, headers={"X-Return-Format": "text"}, timeout=40)
         if resp.status_code != 200 or len(resp.text) < 500: return None
         transcript = " ".join(resp.text.split("Title:", 1)[-1].split()[:20000])
         
@@ -148,58 +169,66 @@ def run_single_video_analysis(video, model_type="claude"):
 【字幕】：{transcript}"""
         
         if model_type == "claude":
-            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}, timeout=120)
-            res = json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
+            r = requests.post(URL_OPENROUTER, headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}, timeout=120)
+            res = safe_parse_json(r.json()["choices"][0]["message"]["content"])
         else:
-            client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
+            client = OpenAI(api_key=KIMI_API_KEY, base_url=URL_MOONSHOT)
             r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}], temperature=KIMI_TEMPERATURE)
-            res = json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
+            res = safe_parse_json(r.choices[0].message.content)
         
         if res and res.get("is_relevant") is False:
             print(f"    ⏭️ [拦截] {res.get('relevance_analysis', '无关内容')} -> 丢弃。")
             return None
-        print("    ✅ [通过] 优质情报。")
-        return res
+        if res:
+            print("    ✅ [通过] 优质情报。")
+            return res
+        return None
     except: return None
 
 # ════════════════════════════════════════════════════════════════
-# Phase 2: 全案策划 (修复 URL 格式，优化标题提示词)
+# Phase 2: 全案策划 (加入重试机制 + 极强提示词压制)
 # ════════════════════════════════════════════════════════════════
 def generate_global_wrapup(summaries, model_type="claude"):
     print(f"\n[全案] 正在合成爆款标题、导读与封面 Prompt...")
     base_data = [{"title": s['title'], "tldr": s['tldr']} for s in summaries if s]
     
     prompt = f"""基于今日这 {len(base_data)} 篇情报，完成以下3个任务：
-1. 拟定一个 10-20 字的爆款中文标题（具有极强的新媒体/微信公众号吸睛风格，制造悬念或点明核心冲突）。
+1. 拟定一个 20 字以内的爆款中文标题（具有极强的新媒体/微信公众号吸睛风格，制造悬念或点明核心冲突，严禁平淡无味）。
 2. 撰写一个不超过 50 字的最抓马的反共识中文导读（今日摘要）。
 3. 生成一段高质量的英文生图提示词(cover_prompt)。紧扣今日情报核心，画风：Cyberpunk, neon glowing, cinematic lighting, unreal engine 5。不要包含任何文本或字母。
 
 【数据】：{json.dumps(base_data, ensure_ascii=False)}
 【严格输出要求】：必须且只能输出一个合法的 JSON 对象，绝对不能包含任何分析、问候语或 markdown 代码块标记。
 {{ "article_title": "极具网感的公众号爆款标题", "article_summary": "50字内导读", "cover_prompt": "A futuristic..." }}"""
-    try:
-        if model_type == "claude":
-            # 🚨 修复了此处多余的 markdown 括号
-            r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
-            return json.loads(re.search(r'\{[\s\S]*\}', r.json()["choices"][0]["message"]["content"]).group(0))
-        else:
-            client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
-            r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}])
-            return json.loads(re.search(r'\{[\s\S]*\}', r.choices[0].message.content).group(0))
-    except Exception as e: 
-        print(f"  ⚠️ 策划生成解析失败 ({model_type}): {e}")
-        return {"article_title": "巨头暗战与前沿科技：硅谷硬核解码", "article_summary": "今日硬核科技与投资情报汇总，一分钟速览硅谷最新思想碰撞。", "cover_prompt": "Futuristic AI artificial intelligence brain glowing circuits, cyberpunk"}
+    
+    for attempt in range(3):
+        try:
+            if model_type == "claude":
+                r = requests.post(URL_OPENROUTER, headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+                res = safe_parse_json(r.json()["choices"][0]["message"]["content"])
+            else:
+                client = OpenAI(api_key=KIMI_API_KEY, base_url=URL_MOONSHOT)
+                r = client.chat.completions.create(model="kimi-k2.5", messages=[{"role": "user", "content": prompt}])
+                res = safe_parse_json(r.choices[0].message.content)
+            
+            if res and res.get("article_title"):
+                print(f"  ✅ 策划生成成功！标题：{res['article_title'][:15]}...")
+                return res
+        except Exception as e: 
+            print(f"  ⚠️ 策划解析失败 ({model_type} 尝试 {attempt+1}/3): {e}")
+            time.sleep(2)
+            
+    return {"article_title": "巨头暗战与前沿科技：硅谷硬核解码", "article_summary": "当地缘核弹引爆能源危机，AI正从硅谷实验室悄然接管全球生存法则。", "cover_prompt": "Futuristic AI artificial intelligence brain glowing circuits, cyberpunk"}
 
 # ════════════════════════════════════════════════════════════════
-# Phase 3: AI生图与图床转存 (修复 URL 格式)
+# Phase 3: AI生图与图床转存 (URL 防腐保护)
 # ════════════════════════════════════════════════════════════════
 def generate_ai_cover(prompt):
     if not SF_API_KEY or not prompt: return ""
     print(f"\n[生图] 正在调用硅基流动 FLUX 生成封面...")
     try:
-        # 🚨 修复了此处多余的 markdown 括号
         resp = requests.post(
-            "https://api.siliconflow.cn/v1/images/generations",
+            URL_SILICONFLOW,
             headers={"Authorization": f"Bearer {SF_API_KEY}", "Content-Type": "application/json"},
             json={"model": "black-forest-labs/FLUX.1-schnell", "prompt": prompt, "n": 1, "image_size": "1024x576"},
             timeout=60
@@ -218,8 +247,7 @@ def upload_to_imgbb_via_url(sf_url):
         img_resp = requests.get(sf_url, timeout=30)
         img_b64 = base64.b64encode(img_resp.content).decode("utf-8")
         
-        # 🚨 修复了此处多余的 markdown 括号
-        upload_resp = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_b64}, timeout=45)
+        upload_resp = requests.post(URL_IMGBB, data={"key": IMGBB_API_KEY, "image": img_b64}, timeout=45)
         if upload_resp.status_code == 200:
             final_url = upload_resp.json()["data"]["url"]
             print(f"  ✅ 图床转存成功！固定直链: {final_url}")
@@ -249,7 +277,7 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🎯 核心主张**：{sanitize_text(v.get('core_thesis', ''))}\n**🧱 论点与证据链**：\n{args_text}\n**🧠 反共识**：{sanitize_text(v.get('counter_consensus', ''))}"}})
             elements.append({"tag": "hr"})
         
-        # 🚨 飞书：主标题固定，副标题展示自动生成的公众号标题
+        # 🚨 飞书：主标题固定，副标题展示自动生成的公众号爆款标题
         payload = {
             "msg_type": "interactive", 
             "card": {
@@ -304,7 +332,7 @@ def build_and_push(summaries, wrapup, final_cover_url, channel="feishu"):
         print("  ✅ 已向微信极简云推送完毕")
 
 def main():
-    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V23.1 (网络链接修复版) 启动\n" + "=" * 60)
+    print("=" * 60 + "\n🚀 硅谷智能护盾情报系统 V26.0 (URL隐身防腐版) 启动\n" + "=" * 60)
     candidates_pool = scan_best_videos_strictly()
     if not candidates_pool:
         print("📭 过去 24 小时没有任何新鲜情报。")
@@ -342,7 +370,7 @@ def main():
         
         build_and_push(k_summaries, kimi_wrap, final_cover_url, "wechat")
 
-    print("\n🎉 V23.1 全量处理完毕！")
+    print("\n🎉 V26.0 全量处理完毕！")
 
 if __name__ == "__main__":
     main()
